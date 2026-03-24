@@ -16,6 +16,8 @@ python3 bloomberg_terminal.py
 - **Clear error states** - shows "NO DATA" when APIs fail
 - **Easy API swapping** - all APIs configured in one place
 - **Trade History** - record and view all your buys/sells with persistent storage
+- **Price Charts** - ASCII charts for historical price visualization
+- **Asset Comparison** - compare performance of two assets over time
 
 ---
 
@@ -292,6 +294,10 @@ No external dependencies required - uses only Python standard library.
 | `view <sym>` | Focus on a symbol |
 | `refresh` | Force data refresh |
 | `back` | Return to main view |
+| `chart <sym> <days>` | Show price chart for last N days |
+| `chart <sym> <start> <end>` | Show price chart for date range (YYYY-MM-DD) |
+| `compare <sym1> <sym2> <days>` | Compare two assets over N days |
+| `compare <sym1> <sym2> <start> <end>` | Compare two assets for date range |
 | `buy <sym> <qty>` | Record a buy trade at current market price |
 | `sell <sym> <qty>` | Record a sell trade at current market price |
 | `history` or `trades` | View trade history |
@@ -304,6 +310,35 @@ No external dependencies required - uses only Python standard library.
 | `H` | Toggle trade history view |
 | `Esc` | Return to main view |
 | `Ctrl+C` | Exit terminal |
+
+## Price Charts & Comparisons
+
+View historical price data with ASCII charts directly in your terminal.
+
+### Single Asset Chart
+
+```
+COMMAND> chart BTC 30
+[Shows BTC price chart for last 30 days]
+
+COMMAND> chart ETH 2024-01-01 2024-03-01
+[Shows ETH price from Jan 1 to Mar 1, 2024]
+```
+
+### Compare Two Assets
+
+```
+COMMAND> compare BTC ETH 30
+[Shows percentage change comparison for last 30 days]
+
+COMMAND> compare BTC ETH 2024-01-01 2024-06-01
+[Shows comparison for date range]
+```
+
+### Supported Assets for Charts
+
+Charts work for crypto assets via CoinGecko API:
+- BTC, ETH, SOL, XRP, DOGE, ADA, AVAX, LINK, DOT, MATIC, LTC, UNI
 
 ## Trade History
 

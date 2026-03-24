@@ -627,6 +627,407 @@ def get_mock_data() -> Dict:
     return {}
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# HISTORICAL PRICE DATA - Charts and Comparisons
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# CoinGecko ID mappings for historical data
+COINGECKO_IDS = {
+    'BTC': 'bitcoin',
+    'ETH': 'ethereum',
+    'SOL': 'solana',
+    'XRP': 'ripple',
+    'DOGE': 'dogecoin',
+    'ADA': 'cardano',
+    'AVAX': 'avalanche-2',
+    'LINK': 'chainlink',
+    'DOT': 'polkadot',
+    'MATIC': 'matic-network',
+    'LTC': 'litecoin',
+    'UNI': 'uniswap',
+}
+
+# Cache for historical data to avoid repeated API calls
+_historical_cache: Dict[str, Tuple[List, float]] = {}
+
+
+def get_historical_prices(symbol: str, days: int = 30) -> Optional[List[Dict]]:
+    """Fetch historical price data from CoinGecko (free, no key)
+    
+    Args:
+        symbol: Crypto symbol (BTC, ETH, etc.)
+        days: Number of days of history (max 365 for free API)
+    
+    Returns:
+        List of {'timestamp': int, 'price': float, 'date': str}
+    """
+    # Check cache first (cache for 5 minutes)
+    cache_key = f"{symbol}_{days}"
+    if cache_key in _historical_cache:
+        cached_data, cache_time = _historical_cache[cache_key]
+        if time.time() - cache_time < 300:  # 5 minute cache
+            return cached_data
+    
+    coingecko_id = COINGECKO_IDS.get(symbol.upper())
+    if not coingecko_id:
+        return None
+    
+    try:
+        url = f"https://api.coingecko.com/api/v3/coins/{coingecko_id}/market_chart"
+        params = f"?vs_currency=usd&days={days}&interval=daily"
+        
+        req = urllib.request.Request(url + params, headers={
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        })
+        
+        with urllib.request.urlopen(req, timeout=10) as response:
+            result = json.loads(response.read().decode())
+        
+        if 'prices' in result:
+            data = []
+            for ts, price in result['prices']:
+                dt = datetime.fromtimestamp(ts / 1000)
+                data.append({
+                    'timestamp': ts,
+                    'price': price,
+                    'date': dt.strftime('%Y-%m-%d'),
+                    'datetime': dt
+                })
+            
+            # Cache the result
+            _historical_cache[cache_key] = (data, time.time())
+            return data
+    except Exception as e:
+        pass
+    
+    return None
+
+
+def get_historical_range(symbol: str, start_date: str, end_date: str) -> Optional[List[Dict]]:
+    """Fetch historical prices for a specific date range
+    
+    Args:
+        symbol: Crypto symbol
+        start_date: Start date 'YYYY-MM-DD'
+        end_date: End date 'YYYY-MM-DD'
+    
+    Returns:
+        List of price data points
+    """
+    coingecko_id = COINGECKO_IDS.get(symbol.upper())
+    if not coingecko_id:
+        return None
+    
+    try:
+        # Convert dates to timestamps
+        start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+        end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+        
+        start_ts = int(start_dt.timestamp())
+        end_ts = int(end_dt.timestamp())
+        
+        url = f"https://api.coingecko.com/api/v3/coins/{coingecko_id}/market_chart/range"
+        params = f"?vs_currency=usd&from={start_ts}&to={end_ts}"
+        
+        req = urllib.request.Request(url + params, headers={
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        })
+        
+        with urllib.request.urlopen(req, timeout=15) as response:
+            result = json.loads(response.read().decode())
+        
+        if 'prices' in result:
+            data = []
+            for ts, price in result['prices']:
+                dt = datetime.fromtimestamp(ts / 1000)
+                data.append({
+                    'timestamp': ts,
+                    'price': price,
+                    'date': dt.strftime('%Y-%m-%d'),
+                    'datetime': dt
+                })
+            return data
+    except Exception:
+        pass
+    
+    return None
+
+
+class PriceChart:
+    """ASCII Chart renderer for price data"""
+    
+    def __init__(self, width: int = 80, height: int = 20):
+        self.width = width
+        self.height = height
+    
+    def normalize_data(self, data: List[float]) -> List[float]:
+        """Normalize data to 0-1 range"""
+        if not data:
+            return []
+        min_val = min(data)
+        max_val = max(data)
+        if max_val == min_val:
+            return [0.5] * len(data)
+        return [(x - min_val) / (max_val - min_val) for x in data]
+    
+    def render_ascii(self, data: List[Dict], title: str = "Price Chart") -> List[str]:
+        """Render ASCII chart from price data
+        
+        Returns list of strings (lines)
+        """
+        if not data:
+            return ["NO DATA AVAILABLE"]
+        
+        prices = [d['price'] for d in data]
+        dates = [d['date'] for d in data]
+        
+        # Normalize prices
+        normalized = self.normalize_data(prices)
+        
+        min_price = min(prices)
+        max_price = max(prices)
+        
+        # Chart dimensions
+        chart_width = self.width - 15  # Leave room for Y-axis labels
+        chart_height = self.height - 4  # Leave room for title and X-axis
+        
+        lines = []
+        
+        # Title
+        lines.append(f" {title}")
+        lines.append(f" Range: ${min_price:,.2f} - ${max_price:,.2f}")
+        lines.append(" " + "─" * (chart_width + 10))
+        
+        # Create chart grid
+        # Sample data points to fit chart width
+        if len(normalized) > chart_width:
+            step = len(normalized) / chart_width
+            sampled_indices = [int(i * step) for i in range(chart_width)]
+            sampled_normalized = [normalized[i] for i in sampled_indices]
+            sampled_dates = [dates[i] for i in sampled_indices]
+        else:
+            sampled_normalized = normalized
+            sampled_dates = dates
+        
+        # Render each row (top to bottom)
+        for row in range(chart_height, 0, -1):
+            threshold = row / chart_height
+            line = ""
+            
+            for val in sampled_normalized:
+                if val >= threshold:
+                    line += "█"
+                elif val >= threshold - 0.1:
+                    line += "▄"
+                else:
+                    line += " "
+            
+            # Y-axis label
+            y_val = min_price + (max_price - min_price) * (row / chart_height)
+            lines.append(f" ${y_val:>10,.0f} │{line}")
+        
+        # X-axis
+        lines.append(" " + " " * 11 + "└" + "─" * len(sampled_normalized))
+        
+        # X-axis labels (show first, middle, last dates)
+        if len(sampled_dates) >= 3:
+            first = sampled_dates[0]
+            middle = sampled_dates[len(sampled_dates) // 2]
+            last = sampled_dates[-1]
+            label_line = " " * 12 + first
+            label_line += " " * (len(sampled_normalized) // 2 - len(first) - len(middle) // 2)
+            label_line += middle
+            label_line += " " * (len(sampled_normalized) - len(label_line) + 12)
+            label_line += last
+            lines.append(label_line[:self.width])
+        
+        return lines
+    
+    def render_comparison(self, datasets: List[Tuple[str, List[Dict]]], title: str = "Comparison") -> List[str]:
+        """Render multiple datasets on same chart for comparison
+        
+        Args:
+            datasets: List of (label, price_data) tuples
+        """
+        if not datasets:
+            return ["NO DATA AVAILABLE"]
+        
+        # Get all prices from all datasets
+        all_prices = []
+        for label, data in datasets:
+            all_prices.extend([d['price'] for d in data])
+        
+        if not all_prices:
+            return ["NO DATA AVAILABLE"]
+        
+        min_price = min(all_prices)
+        max_price = max(all_prices)
+        
+        # Normalize all datasets to same scale
+        normalized_datasets = []
+        for label, data in datasets:
+            prices = [d['price'] for d in data]
+            normalized = [(p - min_price) / (max_price - min_price) if max_price > min_price else 0.5 
+                         for p in prices]
+            normalized_datasets.append((label, normalized, data))
+        
+        chart_width = self.width - 15
+        chart_height = self.height - 6
+        
+        lines = []
+        
+        # Title
+        lines.append(f" {title}")
+        lines.append(f" Range: ${min_price:,.2f} - ${max_price:,.2f}")
+        
+        # Legend
+        legend = "  ".join([f"● {label}" for label, _, _ in datasets])
+        lines.append(f" {legend}"[:self.width])
+        lines.append(" " + "─" * (chart_width + 10))
+        
+        # Chart characters for different datasets
+        chars = ['█', '░', '▓', '▒', '■', '□']
+        
+        # Sample all datasets to same length
+        min_len = min(len(n) for _, n, _ in normalized_datasets)
+        if min_len > chart_width:
+            step = min_len / chart_width
+            sampled_datasets = []
+            for label, normalized, data in normalized_datasets:
+                sampled = [normalized[int(i * step)] for i in range(chart_width)]
+                sampled_datasets.append((label, sampled))
+        else:
+            sampled_datasets = [(label, n[:min_len]) for label, n in normalized_datasets]
+        
+        # Render chart
+        for row in range(chart_height, 0, -1):
+            threshold = row / chart_height
+            line = ""
+            
+            for col in range(len(sampled_datasets[0][1])):
+                # Find which dataset has the highest value at this column
+                vals = [sampled_datasets[i][1][col] for i in range(len(sampled_datasets))]
+                
+                # Check if any value is at or above threshold
+                char = " "
+                for i, val in enumerate(vals):
+                    if val >= threshold:
+                        char = chars[i % len(chars)]
+                        break
+                    elif val >= threshold - 0.05:
+                        char = chars[i % len(chars)].lower() if chars[i % len(chars)].isupper() else chars[i % len(chars)]
+                        break
+                
+                line += char
+            
+            y_val = min_price + (max_price - min_price) * (row / chart_height)
+            lines.append(f" ${y_val:>10,.0f} │{line}")
+        
+        # X-axis
+        lines.append(" " + " " * 11 + "└" + "─" * len(sampled_datasets[0][1]))
+        
+        # Date labels from first dataset
+        _, first_data = datasets[0]
+        if first_data:
+            dates = [d['date'] for d in first_data]
+            if len(dates) >= 3:
+                first = dates[0]
+                middle = dates[len(dates) // 2]
+                last = dates[-1]
+                label_line = " " * 12 + first + " " * 10 + middle + " " * 10 + last
+                lines.append(label_line[:self.width])
+        
+        return lines
+    
+    def render_percentage_change(self, datasets: List[Tuple[str, List[Dict]]], title: str = "Percentage Change") -> List[str]:
+        """Render percentage change comparison (all start at 100%)"""
+        if not datasets:
+            return ["NO DATA AVAILABLE"]
+        
+        # Calculate percentage changes
+        pct_datasets = []
+        for label, data in datasets:
+            if not data:
+                continue
+            start_price = data[0]['price']
+            pct_changes = [(d['price'] / start_price - 1) * 100 for d in data]
+            pct_datasets.append((label, pct_changes, data))
+        
+        if not pct_datasets:
+            return ["NO DATA AVAILABLE"]
+        
+        # Find min/max percentage changes
+        all_changes = []
+        for _, changes, _ in pct_datasets:
+            all_changes.extend(changes)
+        
+        min_pct = min(all_changes)
+        max_pct = max(all_changes)
+        
+        # Center around 0
+        max_abs = max(abs(min_pct), abs(max_pct))
+        min_pct = -max_abs
+        max_pct = max_abs
+        
+        chart_width = self.width - 15
+        chart_height = self.height - 6
+        
+        lines = []
+        
+        # Title
+        lines.append(f" {title}")
+        lines.append(f" Range: {min_pct:+.1f}% to {max_pct:+.1f}%")
+        
+        # Legend
+        legend = "  ".join([f"● {label}" for label, _, _ in pct_datasets])
+        lines.append(f" {legend}"[:self.width])
+        lines.append(" " + "─" * (chart_width + 10))
+        
+        # Chart characters
+        chars = ['█', '░', '▓']
+        
+        # Sample to fit width
+        min_len = min(len(c) for _, c, _ in pct_datasets)
+        if min_len > chart_width:
+            step = min_len / chart_width
+            sampled = [(label, [changes[int(i * step)] for i in range(chart_width)]) 
+                      for label, changes, _ in pct_datasets]
+        else:
+            sampled = [(label, c[:min_len]) for label, c, _ in pct_datasets]
+        
+        # Render chart
+        for row in range(chart_height, 0, -1):
+            threshold = min_pct + (max_pct - min_pct) * (row / chart_height)
+            line = ""
+            
+            for col in range(len(sampled[0][1])):
+                vals = [s[1][col] for s in sampled]
+                
+                char = " "
+                for i, val in enumerate(vals):
+                    if val >= threshold:
+                        char = chars[i % len(chars)]
+                        break
+                    elif val >= threshold - (max_pct - min_pct) / chart_height * 2:
+                        char = chars[i % len(chars)]
+                        break
+                
+                line += char
+            
+            # Y-axis label with % sign
+            y_val = min_pct + (max_pct - min_pct) * (row / chart_height)
+            lines.append(f" {y_val:>+10.1f}% │{line}")
+        
+        # X-axis
+        lines.append(" " + " " * 11 + "└" + "─" * len(sampled[0][1]))
+        
+        # Zero line indicator
+        zero_row = int((0 - min_pct) / (max_pct - min_pct) * chart_height)
+        lines.append(f" (0% baseline at row {chart_height - zero_row})")
+        
+        return lines
+
+
 # Featured assets to highlight at the top
 FEATURED_ASSETS = ["BTC", "ETH", "SPX", "GOLD", "OIL", "EUR/USD"]
 
@@ -660,7 +1061,12 @@ class BloombergTerminal:
         self.api_status = "CONNECTING..."  # Track API status
         self.last_fetch_time = None
         self.fetch_errors = []  # Track which APIs failed
-        self.view_mode = "main"  # Current view: "main", "history", "asset"
+        self.view_mode = "main"  # Current view: "main", "history", "asset", "chart"
+        
+        # Chart data storage
+        self.chart_data = None  # Current chart data to display
+        self.chart_title = ""
+        self.chart_lines = []  # Rendered chart lines
         
         # Setup curses
         self.setup()
@@ -988,7 +1394,7 @@ class BloombergTerminal:
             pass
         
         # Help text
-        self.draw_text(y + 1, 2, "help │ view <sym> │ back │ buy/sell <sym> <qty> │ history │ delete <id> │ [H] key for trades", COLOR_DIM)
+        self.draw_text(y + 1, 2, "help │ view <sym> │ chart <sym> <days> │ compare <sym1> <sym2> <days> │ history │ [H] trades", COLOR_DIM)
     
     def render_trade_history(self):
         """Render the trade history view"""
@@ -1076,11 +1482,60 @@ class BloombergTerminal:
         
         self.screen.refresh()
     
+    def render_chart(self):
+        """Render the chart view"""
+        self.screen.clear()
+        self.height, self.width = self.screen.getmaxyx()
+        y = 0
+        
+        # Header
+        self.draw_header(y)
+        y += 5
+        
+        # Title
+        self.draw_line(y, "═" * (self.width - 1), COLOR_AMBER, bold=True)
+        self.draw_text(y + 1, 2, f"★ {self.chart_title} ★", COLOR_YELLOW, bold=True)
+        self.draw_text(y + 1, self.width - 30, "Press 'back' to return", COLOR_DIM)
+        self.draw_line(y + 2, "═" * (self.width - 1), COLOR_AMBER, bold=True)
+        y += 4
+        
+        # Render chart lines
+        if self.chart_lines:
+            for line in self.chart_lines:
+                if y < self.height - 4:
+                    # Color the chart based on content
+                    if "Range:" in line or "●" in line:
+                        self.draw_line(y, line[:self.width-1], COLOR_CYAN)
+                    elif "$" in line and "│" in line:
+                        # Price lines - green for high, red for low
+                        self.draw_line(y, line[:self.width-1], COLOR_WHITE)
+                    elif "─" in line or "└" in line:
+                        self.draw_line(y, line[:self.width-1], COLOR_AMBER)
+                    else:
+                        self.draw_line(y, line[:self.width-1], COLOR_WHITE)
+                    y += 1
+        else:
+            self.draw_line(y, "No chart data. Use 'chart <symbol> <days>' or 'compare <sym1> <sym2> <days>'", COLOR_DIM)
+            y += 1
+        
+        # Messages
+        y = self.draw_messages(max(y + 1, self.height - 6))
+        
+        # Command
+        self.draw_command(self.height - 3)
+        
+        self.screen.refresh()
+    
     def render(self):
         """Render the full terminal display"""
         # Check if we should render trade history view
         if self.view_mode == "history":
             self.render_trade_history()
+            return
+        
+        # Check if we should render chart view
+        if self.view_mode == "chart":
+            self.render_chart()
             return
         
         self.screen.clear()
@@ -1134,7 +1589,7 @@ class BloombergTerminal:
             return
         
         if parts[0] == "help":
-            self.add_message("Commands: view, back, bal, refresh, buy/sell, history, trades", "info")
+            self.add_message("Commands: view, chart, compare, history, buy/sell, delete, back, refresh", "info")
         
         elif parts[0] == "view" and len(parts) > 1:
             sym = parts[1].upper()
@@ -1209,6 +1664,119 @@ class BloombergTerminal:
                     self.add_message(f"Trade #{trade_id} not found", "err")
             except ValueError:
                 self.add_message("Invalid trade ID", "err")
+        
+        elif parts[0] == "chart":
+            # chart <symbol> <days> - Show price chart
+            # chart <symbol> <start_date> <end_date> - Show price chart for date range
+            if len(parts) >= 3:
+                symbol = parts[1].upper()
+                
+                # Check if it's a date range or just days
+                if len(parts) >= 4:
+                    # Date range mode: chart BTC 2024-01-01 2024-03-01
+                    start_date = parts[2]
+                    end_date = parts[3]
+                    self.add_message(f"Fetching {symbol} from {start_date} to {end_date}...", "info")
+                    
+                    # Fetch in background to not block
+                    def fetch_range():
+                        data = get_historical_range(symbol, start_date, end_date)
+                        if data:
+                            chart = PriceChart(self.width, 25)
+                            self.chart_lines = chart.render_ascii(data, f"{symbol} Price Chart")
+                            self.chart_title = f"{symbol}: {start_date} to {end_date}"
+                            self.view_mode = "chart"
+                            self.add_message(f"Loaded {len(data)} data points for {symbol}", "ok")
+                        else:
+                            self.add_message(f"Could not fetch data for {symbol}", "err")
+                    
+                    thread = threading.Thread(target=fetch_range, daemon=True)
+                    thread.start()
+                else:
+                    # Days mode: chart BTC 30
+                    try:
+                        days = int(parts[2])
+                        self.add_message(f"Fetching {symbol} for {days} days...", "info")
+                        
+                        def fetch_days():
+                            data = get_historical_prices(symbol, days)
+                            if data:
+                                chart = PriceChart(self.width, 25)
+                                self.chart_lines = chart.render_ascii(data, f"{symbol} Price Chart ({days} days)")
+                                self.chart_title = f"{symbol} - {days} Day History"
+                                self.view_mode = "chart"
+                                self.add_message(f"Loaded {len(data)} data points for {symbol}", "ok")
+                            else:
+                                self.add_message(f"Could not fetch data for {symbol}", "err")
+                        
+                        thread = threading.Thread(target=fetch_days, daemon=True)
+                        thread.start()
+                    except ValueError:
+                        self.add_message("Usage: chart <symbol> <days> OR chart <symbol> <start> <end>", "err")
+            else:
+                self.add_message("Usage: chart <symbol> <days> OR chart <symbol> <start_date> <end_date>", "err")
+        
+        elif parts[0] == "compare":
+            # compare <sym1> <sym2> <days> - Compare two assets
+            # compare <sym1> <sym2> <start> <end> - Compare for date range
+            if len(parts) >= 4:
+                sym1 = parts[1].upper()
+                sym2 = parts[2].upper()
+                
+                if len(parts) >= 5:
+                    # Date range mode
+                    start_date = parts[3]
+                    end_date = parts[4]
+                    self.add_message(f"Fetching {sym1} vs {sym2} from {start_date} to {end_date}...", "info")
+                    
+                    def fetch_compare_range():
+                        data1 = get_historical_range(sym1, start_date, end_date)
+                        data2 = get_historical_range(sym2, start_date, end_date)
+                        
+                        if data1 and data2:
+                            chart = PriceChart(self.width, 25)
+                            datasets = [(sym1, data1), (sym2, data2)]
+                            self.chart_lines = chart.render_percentage_change(datasets, f"{sym1} vs {sym2}")
+                            self.chart_title = f"{sym1} vs {sym2} Comparison"
+                            self.view_mode = "chart"
+                            self.add_message(f"Loaded comparison: {len(data1)} + {len(data2)} points", "ok")
+                        else:
+                            missing = []
+                            if not data1: missing.append(sym1)
+                            if not data2: missing.append(sym2)
+                            self.add_message(f"Could not fetch data for: {', '.join(missing)}", "err")
+                    
+                    thread = threading.Thread(target=fetch_compare_range, daemon=True)
+                    thread.start()
+                else:
+                    # Days mode
+                    try:
+                        days = int(parts[3])
+                        self.add_message(f"Fetching {sym1} vs {sym2} for {days} days...", "info")
+                        
+                        def fetch_compare():
+                            data1 = get_historical_prices(sym1, days)
+                            data2 = get_historical_prices(sym2, days)
+                            
+                            if data1 and data2:
+                                chart = PriceChart(self.width, 25)
+                                datasets = [(sym1, data1), (sym2, data2)]
+                                self.chart_lines = chart.render_percentage_change(datasets, f"{sym1} vs {sym2}")
+                                self.chart_title = f"{sym1} vs {sym2} - {days} Days"
+                                self.view_mode = "chart"
+                                self.add_message(f"Loaded comparison: {len(data1)} + {len(data2)} points", "ok")
+                            else:
+                                missing = []
+                                if not data1: missing.append(sym1)
+                                if not data2: missing.append(sym2)
+                                self.add_message(f"Could not fetch data for: {', '.join(missing)}", "err")
+                        
+                        thread = threading.Thread(target=fetch_compare, daemon=True)
+                        thread.start()
+                    except ValueError:
+                        self.add_message("Usage: compare <sym1> <sym2> <days>", "err")
+            else:
+                self.add_message("Usage: compare <sym1> <sym2> <days> OR compare <sym1> <sym2> <start> <end>", "err")
         
         else:
             self.add_message(f"Unknown: {parts[0]}", "err")
