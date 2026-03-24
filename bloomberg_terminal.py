@@ -1453,6 +1453,221 @@ class PriceChart:
 FEATURED_ASSETS = ["BTC", "ETH", "SPX", "GOLD", "OIL", "EUR/USD"]
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# NEWS HEADLINES - RSS and Reddit Sources
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# News sources - RSS feeds (free, converted via rss2json.com)
+NEWS_SOURCES = {
+    'business': {
+        'name': 'Business News',
+        'sources': [
+            ('Reddit Business', 'https://www.reddit.com/r/business/hot.json?limit=15'),
+        ]
+    },
+    'stocks': {
+        'name': 'Stock Market',
+        'sources': [
+            ('Reddit Stocks', 'https://www.reddit.com/r/stocks/hot.json?limit=15'),
+        ]
+    },
+    'crypto': {
+        'name': 'Crypto News',
+        'sources': [
+            ('Reddit Crypto', 'https://www.reddit.com/r/CryptoCurrency/hot.json?limit=15'),
+        ]
+    },
+    'politics': {
+        'name': 'Politics',
+        'sources': [
+            ('Reddit Politics', 'https://www.reddit.com/r/politics/hot.json?limit=15'),
+        ]
+    },
+    'world': {
+        'name': 'World News',
+        'sources': [
+            ('Reddit WorldNews', 'https://www.reddit.com/r/worldnews/hot.json?limit=15'),
+        ]
+    },
+}
+
+# Reddit sources for discussions (free JSON API, no key)
+REDDIT_SOURCES = {
+    'stocks': 'https://www.reddit.com/r/stocks/hot.json?limit=15',
+    'wallstreetbets': 'https://www.reddit.com/r/wallstreetbets/hot.json?limit=15',
+    'crypto': 'https://www.reddit.com/r/CryptoCurrency/hot.json?limit=15',
+    'politics': 'https://www.reddit.com/r/politics/hot.json?limit=15',
+    'economy': 'https://www.reddit.com/r/economy/hot.json?limit=15',
+    'business': 'https://www.reddit.com/r/business/hot.json?limit=15',
+    'worldnews': 'https://www.reddit.com/r/worldnews/hot.json?limit=15',
+    'investing': 'https://www.reddit.com/r/investing/hot.json?limit=15',
+    'options': 'https://www.reddit.com/r/options/hot.json?limit=15',
+    'forex': 'https://www.reddit.com/r/Forex/hot.json?limit=15',
+}
+
+# News cache
+_news_cache: Dict[str, Tuple[List, float]] = {}
+NEWS_CACHE_DURATION = 300  # 5 minutes
+
+
+def fetch_rss_news(rss_url: str, limit: int = 10) -> List[Dict]:
+    """Fetch news from RSS feed via rss2json converter (free, no key)
+    
+    Args:
+        rss_url: RSS feed URL
+        limit: Maximum number of articles
+    
+    Returns:
+        List of news articles
+    """
+    try:
+        # Use rss2json.com to convert RSS to JSON (free, no key)
+        converter_url = f"https://api.rss2json.com/v1/api.json?rss_url={urllib.parse.quote(rss_url)}&count={limit}"
+        
+        req = urllib.request.Request(converter_url, headers={
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        })
+        
+        with urllib.request.urlopen(req, timeout=10) as response:
+            result = json.loads(response.read().decode())
+        
+        if result.get('status') == 'ok' and 'items' in result:
+            articles = []
+            for item in result['items'][:limit]:
+                articles.append({
+                    'title': item.get('title', 'No title'),
+                    'link': item.get('link', ''),
+                    'pubDate': item.get('pubDate', ''),
+                    'source': item.get('author', 'Unknown'),
+                    'description': item.get('description', '')[:200] + '...' if len(item.get('description', '')) > 200 else item.get('description', ''),
+                })
+            return articles
+    except Exception:
+        pass
+    
+    return []
+
+
+def fetch_reddit_posts(subreddit_url: str, limit: int = 10) -> List[Dict]:
+    """Fetch posts from Reddit (free JSON API, no key)
+    
+    Args:
+        subreddit_url: Reddit subreddit JSON URL
+        limit: Maximum number of posts
+    
+    Returns:
+        List of posts
+    """
+    try:
+        req = urllib.request.Request(subreddit_url, headers={
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        })
+        
+        with urllib.request.urlopen(req, timeout=10) as response:
+            result = json.loads(response.read().decode())
+        
+        if 'data' in result and 'children' in result['data']:
+            posts = []
+            for child in result['data']['children'][:limit]:
+                post_data = child.get('data', {})
+                posts.append({
+                    'title': post_data.get('title', 'No title'),
+                    'link': f"https://reddit.com{post_data.get('permalink', '')}",
+                    'score': post_data.get('score', 0),
+                    'comments': post_data.get('num_comments', 0),
+                    'subreddit': post_data.get('subreddit', ''),
+                    'author': post_data.get('author', 'Unknown'),
+                })
+            return posts
+    except Exception:
+        pass
+    
+    return []
+
+
+def get_news(category: str = 'business', use_cache: bool = True) -> List[Dict]:
+    """Get news headlines for a category (from Reddit)
+    
+    Args:
+        category: News category (business, stocks, crypto, politics, world)
+        use_cache: Whether to use cached data
+    
+    Returns:
+        List of news articles
+    """
+    cache_key = f"news_{category}"
+    
+    # Check cache
+    if use_cache and cache_key in _news_cache:
+        cached_data, cache_time = _news_cache[cache_key]
+        if time.time() - cache_time < NEWS_CACHE_DURATION:
+            return cached_data
+    
+    # Map category to subreddit
+    category_map = {
+        'business': 'business',
+        'stocks': 'stocks',
+        'crypto': 'CryptoCurrency',
+        'politics': 'politics',
+        'world': 'worldnews',
+    }
+    
+    subreddit = category_map.get(category, category)
+    url = f"https://www.reddit.com/r/{subreddit}/hot.json?limit=15"
+    
+    articles = fetch_reddit_posts(url, limit=15)
+    
+    # Cache results
+    if articles:
+        _news_cache[cache_key] = (articles, time.time())
+    
+    return articles
+
+
+def get_reddit_news(category: str = 'stocks', use_cache: bool = True) -> List[Dict]:
+    """Get Reddit posts for a category
+    
+    Args:
+        category: Reddit category (stocks, wallstreetbets, crypto, politics, economy)
+        use_cache: Whether to use cached data
+    
+    Returns:
+        List of Reddit posts
+    """
+    cache_key = f"reddit_{category}"
+    
+    # Check cache
+    if use_cache and cache_key in _news_cache:
+        cached_data, cache_time = _news_cache[cache_key]
+        if time.time() - cache_time < NEWS_CACHE_DURATION:
+            return cached_data
+    
+    posts = []
+    
+    # Fetch from Reddit
+    if category in REDDIT_SOURCES:
+        posts = fetch_reddit_posts(REDDIT_SOURCES[category], limit=15)
+    
+    # Cache results
+    if posts:
+        _news_cache[cache_key] = (posts, time.time())
+    
+    return posts
+
+
+def get_all_news() -> Dict[str, List[Dict]]:
+    """Get news from all categories"""
+    return {
+        'business': get_news('business'),
+        'stocks': get_news('stocks'),
+        'crypto': get_news('crypto'),
+        'politics': get_news('politics'),
+    }
+
+
+import urllib.parse
+
+
 def update_prices(data: Dict) -> Dict:
     """Simulate real-time price updates"""
     for sym in data:
@@ -1482,12 +1697,17 @@ class BloombergTerminal:
         self.api_status = "CONNECTING..."  # Track API status
         self.last_fetch_time = None
         self.fetch_errors = []  # Track which APIs failed
-        self.view_mode = "main"  # Current view: "main", "history", "asset", "chart"
+        self.view_mode = "main"  # Current view: "main", "history", "asset", "chart", "news"
         
         # Chart data storage
         self.chart_data = None  # Current chart data to display
         self.chart_title = ""
         self.chart_lines = []  # Rendered chart lines
+        
+        # News data storage
+        self.news_data = []  # Current news articles to display
+        self.news_category = "business"  # Current news category
+        self.news_source = "rss"  # "rss" or "reddit"
         
         # Setup curses
         self.setup()
@@ -1815,7 +2035,7 @@ class BloombergTerminal:
             pass
         
         # Help text
-        self.draw_text(y + 1, 2, "help | buy/sell <sym> <qty> [price] | long/short <sym> <qty> [lev] | orders | bal | chart", COLOR_DIM)
+        self.draw_text(y + 1, 2, "help | buy/sell <sym> <qty> | long/short <sym> <qty> | news | reddit | chart", COLOR_DIM)
     
     def render_trade_history(self):
         """Render the trade history view"""
@@ -1947,6 +2167,86 @@ class BloombergTerminal:
         
         self.screen.refresh()
     
+    def render_news(self):
+        """Render the news headlines view"""
+        self.screen.clear()
+        self.height, self.width = self.screen.getmaxyx()
+        y = 0
+        
+        # Header
+        self.draw_header(y)
+        y += 5
+        
+        # Title with category
+        category_name = NEWS_SOURCES.get(self.news_category, {}).get('name', self.news_category.upper())
+        source_name = "Reddit" if self.news_source == "reddit" else "RSS Feeds"
+        
+        self.draw_line(y, "═" * (self.width - 1), COLOR_AMBER, bold=True)
+        title = f"★ NEWS: {category_name} ({source_name}) ★"
+        self.draw_text(y + 1, 2, title, COLOR_YELLOW, bold=True)
+        self.draw_text(y + 1, self.width - 35, "news <category> | reddit <sub>", COLOR_DIM)
+        self.draw_line(y + 2, "═" * (self.width - 1), COLOR_AMBER, bold=True)
+        y += 4
+        
+        # Categories help
+        cats = "Categories: business | stocks | crypto | politics | world"
+        self.draw_text(y, 2, cats, COLOR_CYAN)
+        y += 1
+        reddit_cats = "Reddit: wsb | stocks | crypto | politics | economy"
+        self.draw_text(y, 2, reddit_cats, COLOR_DIM)
+        y += 2
+        
+        # Render news
+        if self.news_data:
+            for i, item in enumerate(self.news_data):
+                if y >= self.height - 4:
+                    break
+                
+                if self.news_source == "reddit":
+                    # Reddit format
+                    title = item.get('title', 'No title')[:self.width - 20]
+                    score = item.get('score', 0)
+                    comments = item.get('comments', 0)
+                    subreddit = item.get('subreddit', '')
+                    
+                    # Title
+                    self.draw_text(y, 2, f"{i+1}.", COLOR_DIM)
+                    self.draw_text(y, 5, title, COLOR_WHITE, bold=True)
+                    y += 1
+                    
+                    # Meta
+                    meta = f"   r/{subreddit} | ↑{score} | 💬{comments}"
+                    self.draw_text(y, 5, meta, COLOR_DIM)
+                    y += 2
+                else:
+                    # RSS format
+                    title = item.get('title', 'No title')[:self.width - 10]
+                    source = item.get('source_name', item.get('source', 'Unknown'))
+                    pub_date = item.get('pubDate', '')[:10]
+                    
+                    # Title
+                    self.draw_text(y, 2, f"{i+1}.", COLOR_DIM)
+                    self.draw_text(y, 5, title, COLOR_WHITE, bold=True)
+                    y += 1
+                    
+                    # Source and date
+                    meta = f"   {source} | {pub_date}"
+                    self.draw_text(y, 5, meta, COLOR_DIM)
+                    y += 2
+        else:
+            self.draw_line(y, "Loading news... or no data available.", COLOR_DIM)
+            y += 1
+            self.draw_line(y, "Use: news <category> or reddit <subreddit>", COLOR_DIM)
+            y += 1
+        
+        # Messages
+        y = self.draw_messages(max(y + 1, self.height - 6))
+        
+        # Command
+        self.draw_command(self.height - 3)
+        
+        self.screen.refresh()
+    
     def render(self):
         """Render the full terminal display"""
         # Check if we should render trade history view
@@ -1957,6 +2257,11 @@ class BloombergTerminal:
         # Check if we should render chart view
         if self.view_mode == "chart":
             self.render_chart()
+            return
+        
+        # Check if we should render news view
+        if self.view_mode == "news":
+            self.render_news()
             return
         
         self.screen.clear()
@@ -2010,8 +2315,9 @@ class BloombergTerminal:
             return
         
         if parts[0] == "help":
-            self.add_message("Commands: view, chart, compare, history, bal, spot/futures, orders, delete, back", "info")
+            self.add_message("Commands: view, chart, compare, history, bal, spot/futures, orders, news, reddit", "info")
             self.add_message("Spot: buy/sell <sym> <qty> [price] | Futures: long/short <sym> <qty> <lev>", "info")
+            self.add_message("News: news <category> | reddit <sub> | Categories: business, stocks, crypto, politics", "info")
         
         elif parts[0] == "view" and len(parts) > 1:
             sym = parts[1].upper()
@@ -2421,6 +2727,67 @@ class BloombergTerminal:
                         self.add_message("Usage: compare <sym1> <sym2> <days>", "err")
             else:
                 self.add_message("Usage: compare <sym1> <sym2> <days> OR compare <sym1> <sym2> <start> <end>", "err")
+        
+        elif parts[0] == "news":
+            # News command: news [category]
+            # Categories: business, stocks, crypto, politics, world
+            category = parts[1].lower() if len(parts) > 1 else "business"
+            
+            valid_categories = ['business', 'stocks', 'crypto', 'politics', 'world']
+            if category not in valid_categories:
+                self.add_message(f"Invalid category. Use: {', '.join(valid_categories)}", "err")
+                return
+            
+            self.news_category = category
+            self.news_source = "rss"
+            self.add_message(f"Fetching {category} news...", "info")
+            
+            def fetch_news():
+                news = get_news(category)
+                if news:
+                    self.news_data = news
+                    self.view_mode = "news"
+                    self.add_message(f"Loaded {len(news)} headlines", "ok")
+                else:
+                    self.add_message("Could not fetch news. Try again later.", "err")
+            
+            threading.Thread(target=fetch_news, daemon=True).start()
+        
+        elif parts[0] == "reddit":
+            # Reddit command: reddit [subreddit]
+            # Subreddits: stocks, wallstreetbets, crypto, politics, economy
+            subreddit = parts[1].lower() if len(parts) > 1 else "stocks"
+            
+            # Map shortcuts
+            subreddit_map = {
+                'wsb': 'wallstreetbets',
+                'wallstreetbets': 'wallstreetbets',
+                'stocks': 'stocks',
+                'crypto': 'crypto',
+                'politics': 'politics',
+                'economy': 'economy',
+            }
+            
+            subreddit = subreddit_map.get(subreddit, subreddit)
+            
+            if subreddit not in REDDIT_SOURCES:
+                self.add_message(f"Invalid subreddit. Use: stocks, wsb, crypto, politics, economy", "err")
+                return
+            
+            self.news_category = subreddit
+            self.news_source = "reddit"
+            self.add_message(f"Fetching r/{subreddit} posts...", "info")
+            
+            def fetch_reddit():
+                posts = get_reddit_news(subreddit)
+                if posts:
+                    self.news_data = posts
+                    self.view_mode = "news"
+                    self.add_message(f"Loaded {len(posts)} posts", "ok")
+                else:
+                    self.add_message("Could not fetch Reddit posts. Try again later.", "err")
+            
+            threading.Thread(target=fetch_reddit, daemon=True).start()
         
         else:
             self.add_message(f"Unknown: {parts[0]}", "err")
