@@ -2435,36 +2435,43 @@ class BloombergTerminal:
         if ch == -1:  # No input
             return True
         
-        # Ctrl+C
+        # Ctrl+C - always exit
         if ch == 3:
             return False
         
-        # H key - toggle trade history
-        if ch == ord('H') or ch == ord('h'):
-            if self.view_mode == "history":
-                self.view_mode = "main"
-                self.add_message("Main view", "info")
-            else:
-                self.view_mode = "history"
-                self.add_message("Trade history view", "info")
-            return True
-        
-        # Enter
+        # Enter - execute command
         if ch == ord('\n') or ch == ord('\r'):
             if self.command.strip():
                 self.process_command(self.command)
             self.command = ""
-        # Escape
+            return True
+        
+        # Escape - clear command or go back
         elif ch == 27:
             self.command = ""
-            if self.view_mode == "history":
+            if self.view_mode == "history" or self.view_mode == "chart":
                 self.view_mode = "main"
+            return True
+        
         # Backspace
         elif ch == 127 or ch == 8 or ch == curses.KEY_BACKSPACE:
             self.command = self.command[:-1]
-        # Printable characters
+            return True
+        
+        # Printable characters (including H)
         elif 32 <= ch <= 126:
-            self.command += chr(ch)
+            # H key - only toggle history if command buffer is empty
+            if (ch == ord('H') or ch == ord('h')) and len(self.command) == 0:
+                if self.view_mode == "history":
+                    self.view_mode = "main"
+                    self.add_message("Main view", "info")
+                else:
+                    self.view_mode = "history"
+                    self.add_message("Trade history view", "info")
+            else:
+                # Add character to command
+                self.command += chr(ch)
+            return True
         
         return True
     
