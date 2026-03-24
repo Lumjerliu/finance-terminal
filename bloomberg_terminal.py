@@ -1302,7 +1302,7 @@ class PriceChart:
         lines.append(f" Range: ${min_price:,.2f} - ${max_price:,.2f}")
         
         # Legend
-        legend = "  ".join([f"● {label}" for label, _, _ in datasets])
+        legend = "  ".join([f"● {label}" for label, _, _ in normalized_datasets])
         lines.append(f" {legend}"[:self.width])
         lines.append(" " + "─" * (chart_width + 10))
         
@@ -1318,7 +1318,7 @@ class PriceChart:
                 sampled = [normalized[int(i * step)] for i in range(chart_width)]
                 sampled_datasets.append((label, sampled))
         else:
-            sampled_datasets = [(label, n[:min_len]) for label, n in normalized_datasets]
+            sampled_datasets = [(label, n[:min_len]) for label, n, _ in normalized_datasets]
         
         # Render chart
         for row in range(chart_height, 0, -1):
