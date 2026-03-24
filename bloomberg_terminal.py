@@ -20,8 +20,12 @@ import asyncio
 import json
 import urllib.request
 import urllib.error
+import urllib.parse
+import xml.etree.ElementTree as ET
 import sqlite3
 import csv
+import re
+import webbrowser
 import hashlib
 import hmac
 import base64
@@ -1021,6 +1025,395 @@ def get_all_real_data() -> Dict:
     return all_data
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# FEAR & GREED INDEX - Crypto Market Sentiment
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_fear_greed_cache = None
+_fear_greed_cache_time = 0
+
+def get_fear_greed_index() -> Dict:
+    """Get Crypto Fear & Greed Index
+    
+    Returns dict with:
+    - value: 0-100 (0=Extreme Fear, 100=Extreme Greed)
+    - classification: text label
+    - history: last 7 days
+    """
+    global _fear_greed_cache, _fear_greed_cache_time
+    
+    # Cache for 1 hour
+    if _fear_greed_cache and time.time() - _fear_greed_cache_time < 3600:
+        return _fear_greed_cache
+    
+    try:
+        url = 'https://api.alternative.me/fng/?limit=7'
+        req = urllib.request.Request(url, headers={
+            'User-Agent': 'Mozilla/5.0'
+        })
+        with urllib.request.urlopen(req, timeout=10) as response:
+            data = json.loads(response.read().decode())
+        
+        if 'data' in data:
+            current = data['data'][0]
+            history = data['data'][1:7] if len(data['data']) > 1 else []
+            
+            result = {
+                'value': int(current['value']),
+                'classification': current['value_classification'],
+                'timestamp': current['timestamp'],
+                'history': [(int(h['value']), h['value_classification']) for h in history]
+            }
+            _fear_greed_cache = result
+            _fear_greed_cache_time = time.time()
+            return result
+    except Exception:
+        pass
+    
+    return {'value': 50, 'classification': 'Neutral', 'history': []}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PRICE ALERTS SYSTEM
+# ═══════════════════════════════════════════════════════════════════════════════
+
+ALERTS_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'alerts.db')
+
+def init_alerts_database():
+    """Initialize alerts database"""
+    conn = sqlite3.connect(ALERTS_DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS alerts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol TEXT NOT NULL,
+            target_price REAL NOT NULL,
+            condition TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            triggered INTEGER DEFAULT 0,
+            triggered_at TEXT
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+def add_alert(symbol: str, target_price: float, condition: str = 'above') -> int:
+    """Add a price alert
+    
+    Args:
+        symbol: Asset symbol (e.g., 'BTC', 'ETH')
+        target_price: Target price
+        condition: 'above' or 'below'
+    
+    Returns:
+        Alert ID
+    """
+    init_alerts_database()
+    conn = sqlite3.connect(ALERTS_DB_PATH)
+    cursor = conn.cursor()
+    
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cursor.execute('''
+        INSERT INTO alerts (symbol, target_price, condition, created_at)
+        VALUES (?, ?, ?, ?)
+    ''', (symbol.upper(), target_price, condition, timestamp))
+    
+    alert_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return alert_id
+
+def get_alerts(active_only: bool = True) -> List[Dict]:
+    """Get all alerts"""
+    init_alerts_database()
+    conn = sqlite3.connect(ALERTS_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    
+    if active_only:
+        cursor.execute('SELECT * FROM alerts WHERE triggered = 0 ORDER BY created_at DESC')
+    else:
+        cursor.execute('SELECT * FROM alerts ORDER BY created_at DESC')
+    
+    alerts = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    return alerts
+
+def delete_alert(alert_id: int) -> bool:
+    """Delete an alert"""
+    init_alerts_database()
+    conn = sqlite3.connect(ALERTS_DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('DELETE FROM alerts WHERE id = ?', (alert_id,))
+    deleted = cursor.rowcount > 0
+    conn.commit()
+    conn.close()
+    return deleted
+
+def check_alerts(current_prices: Dict) -> List[Dict]:
+    """Check if any alerts are triggered"""
+    alerts = get_alerts(active_only=True)
+    triggered = []
+    
+    for alert in alerts:
+        symbol = alert['symbol']
+        if symbol in current_prices:
+            current_price = current_prices[symbol].get('price', 0)
+            target = alert['target_price']
+            condition = alert['condition']
+            
+            if condition == 'above' and current_price >= target:
+                triggered.append({**alert, 'current_price': current_price})
+            elif condition == 'below' and current_price <= target:
+                triggered.append({**alert, 'current_price': current_price})
+    
+    # Mark triggered alerts
+    if triggered:
+        conn = sqlite3.connect(ALERTS_DB_PATH)
+        cursor = conn.cursor()
+        for alert in triggered:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            cursor.execute('UPDATE alerts SET triggered = 1, triggered_at = ? WHERE id = ?',
+                          (timestamp, alert['id']))
+        conn.commit()
+        conn.close()
+    
+    return triggered
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# WATCHLISTS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+WATCHLIST_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'watchlist.db')
+
+def init_watchlist_database():
+    """Initialize watchlist database"""
+    conn = sqlite3.connect(WATCHLIST_DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS watchlist (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol TEXT NOT NULL UNIQUE,
+            added_at TEXT NOT NULL,
+            notes TEXT
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+def add_to_watchlist(symbol: str, notes: str = "") -> bool:
+    """Add symbol to watchlist"""
+    init_watchlist_database()
+    conn = sqlite3.connect(WATCHLIST_DB_PATH)
+    cursor = conn.cursor()
+    
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        cursor.execute('INSERT OR IGNORE INTO watchlist (symbol, added_at, notes) VALUES (?, ?, ?)',
+                      (symbol.upper(), timestamp, notes))
+        conn.commit()
+        return cursor.rowcount > 0
+    except:
+        return False
+    finally:
+        conn.close()
+
+def remove_from_watchlist(symbol: str) -> bool:
+    """Remove symbol from watchlist"""
+    init_watchlist_database()
+    conn = sqlite3.connect(WATCHLIST_DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('DELETE FROM watchlist WHERE symbol = ?', (symbol.upper(),))
+    deleted = cursor.rowcount > 0
+    conn.commit()
+    conn.close()
+    return deleted
+
+def get_watchlist() -> List[str]:
+    """Get watchlist symbols"""
+    init_watchlist_database()
+    conn = sqlite3.connect(WATCHLIST_DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('SELECT symbol FROM watchlist ORDER BY added_at DESC')
+    symbols = [row[0] for row in cursor.fetchall()]
+    conn.close()
+    return symbols
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SENTIMENT ANALYSIS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Simple sentiment word lists (no external ML library needed)
+POSITIVE_WORDS = {
+    'surge', 'soar', 'rally', 'gain', 'rise', 'jump', 'climb', 'bull', 'bullish',
+    'profit', 'growth', 'increase', 'soar', 'rocket', 'moon', 'breakthrough',
+    'positive', 'success', 'win', 'beat', 'exceed', 'outperform', 'upgrade',
+    'strong', 'robust', 'record', 'high', 'higher', 'boost', 'surge', 'rally'
+}
+
+NEGATIVE_WORDS = {
+    'crash', 'plunge', 'drop', 'fall', 'decline', 'bear', 'bearish', 'loss',
+    'down', 'decrease', 'sink', 'tumble', 'slide', 'slump', 'fear', 'panic',
+    'sell', 'selling', 'dump', 'dumping', 'collapse', 'recession', 'crisis',
+    'risk', 'warning', 'downgrade', 'weak', 'concern', 'worried', 'negative',
+    'fail', 'failure', 'bankrupt', 'debt', 'lawsuit', 'investigation', 'fine'
+}
+
+def analyze_sentiment(text: str) -> Dict:
+    """Analyze sentiment of text
+    
+    Returns:
+        - score: -1 to 1 (negative to positive)
+        - label: 'positive', 'negative', or 'neutral'
+        - confidence: 0 to 1
+    """
+    if not text:
+        return {'score': 0, 'label': 'neutral', 'confidence': 0}
+    
+    text_lower = text.lower()
+    words = set(text_lower.split())
+    
+    # Count positive and negative words
+    positive_count = len(words & POSITIVE_WORDS)
+    negative_count = len(words & NEGATIVE_WORDS)
+    
+    total = positive_count + negative_count
+    
+    if total == 0:
+        return {'score': 0, 'label': 'neutral', 'confidence': 0.5}
+    
+    # Calculate score
+    score = (positive_count - negative_count) / total
+    
+    # Determine label
+    if score > 0.2:
+        label = 'positive'
+    elif score < -0.2:
+        label = 'negative'
+    else:
+        label = 'neutral'
+    
+    # Confidence based on how many sentiment words found
+    confidence = min(1.0, total / 5)
+    
+    return {
+        'score': round(score, 2),
+        'label': label,
+        'confidence': round(confidence, 2),
+        'positive_words': positive_count,
+        'negative_words': negative_count
+    }
+
+
+def get_news_sentiment(articles: List[Dict]) -> Dict:
+    """Get overall sentiment from news articles"""
+    if not articles:
+        return {'score': 0, 'label': 'neutral', 'articles_analyzed': 0}
+    
+    scores = []
+    for article in articles[:20]:  # Analyze top 20
+        title = article.get('title', '')
+        desc = article.get('description', '')
+        text = f"{title} {desc}"
+        sentiment = analyze_sentiment(text)
+        scores.append(sentiment['score'])
+    
+    avg_score = sum(scores) / len(scores) if scores else 0
+    
+    if avg_score > 0.15:
+        label = 'positive'
+    elif avg_score < -0.15:
+        label = 'negative'
+    else:
+        label = 'neutral'
+    
+    return {
+        'score': round(avg_score, 2),
+        'label': label,
+        'articles_analyzed': len(scores)
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MARKET HEAT MAP
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def get_market_heat_map(data: Dict) -> List[Dict]:
+    """Generate heat map data for market overview
+    
+    Returns list of assets sorted by performance with heat levels
+    """
+    heat_map = []
+    
+    for symbol, info in data.items():
+        pct = info.get('pct', 0)
+        price = info.get('price', 0)
+        
+        # Determine heat level (1-5)
+        if pct > 5:
+            heat = 5
+        elif pct > 2:
+            heat = 4
+        elif pct > 0:
+            heat = 3
+        elif pct > -2:
+            heat = 2
+        elif pct > -5:
+            heat = 1
+        else:
+            heat = 0
+        
+        heat_map.append({
+            'symbol': symbol,
+            'price': price,
+            'pct': pct,
+            'heat': heat,
+            'direction': 'up' if pct > 0 else 'down' if pct < 0 else 'flat'
+        })
+    
+    # Sort by percentage change
+    heat_map.sort(key=lambda x: x['pct'], reverse=True)
+    return heat_map
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ECONOMIC CALENDAR
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Static economic calendar (major events)
+# In production, this would come from an API
+ECONOMIC_EVENTS = [
+    {'date': '2026-03-26', 'event': 'US GDP Q4 Final', 'impact': 'high', 'forecast': '2.3%'},
+    {'date': '2026-03-27', 'event': 'US Initial Jobless Claims', 'impact': 'medium', 'forecast': '215K'},
+    {'date': '2026-03-28', 'event': 'US PCE Price Index', 'impact': 'high', 'forecast': '2.4%'},
+    {'date': '2026-04-01', 'event': 'ISM Manufacturing PMI', 'impact': 'medium', 'forecast': '50.5'},
+    {'date': '2026-04-02', 'event': 'ADP Nonfarm Employment', 'impact': 'medium', 'forecast': '150K'},
+    {'date': '2026-04-03', 'event': 'US Nonfarm Payrolls', 'impact': 'high', 'forecast': '180K'},
+    {'date': '2026-04-04', 'event': 'US Unemployment Rate', 'impact': 'high', 'forecast': '4.1%'},
+    {'date': '2026-04-10', 'event': 'US CPI Inflation', 'impact': 'high', 'forecast': '2.8%'},
+    {'date': '2026-04-15', 'event': 'US Retail Sales', 'impact': 'medium', 'forecast': '0.3%'},
+    {'date': '2026-04-30', 'event': 'FOMC Meeting', 'impact': 'high', 'forecast': '-'},
+]
+
+def get_economic_calendar(days_ahead: int = 14) -> List[Dict]:
+    """Get upcoming economic events"""
+    from datetime import datetime, timedelta
+    
+    today = datetime.now().date()
+    future = today + timedelta(days=days_ahead)
+    
+    upcoming = []
+    for event in ECONOMIC_EVENTS:
+        event_date = datetime.strptime(event['date'], '%Y-%m-%d').date()
+        if today <= event_date <= future:
+            days_until = (event_date - today).days
+            upcoming.append({**event, 'days_until': days_until})
+    
+    return upcoming
+
+
 def get_quick_prices() -> Dict:
     """Quick fetch of most important prices using reliable free APIs"""
     data = {}
@@ -1462,31 +1855,36 @@ NEWS_SOURCES = {
     'business': {
         'name': 'Business News',
         'sources': [
-            ('Reddit Business', 'https://www.reddit.com/r/business/hot.json?limit=15'),
+            ('CNBC Business', 'https://www.cnbc.com/id/10001147/device/rss/rss.html', 'rss'),
+            ('Yahoo Finance', 'https://finance.yahoo.com/rss/', 'rss'),
         ]
     },
     'stocks': {
         'name': 'Stock Market',
         'sources': [
-            ('Reddit Stocks', 'https://www.reddit.com/r/stocks/hot.json?limit=15'),
+            ('Yahoo Finance', 'https://finance.yahoo.com/rss/', 'rss'),
+            ('CNBC Markets', 'https://www.cnbc.com/id/10000664/device/rss/rss.html', 'rss'),
         ]
     },
     'crypto': {
         'name': 'Crypto News',
         'sources': [
-            ('Reddit Crypto', 'https://www.reddit.com/r/CryptoCurrency/hot.json?limit=15'),
+            ('CoinTelegraph', 'https://cointelegraph.com/rss', 'rss'),
+            ('CoinDesk', 'https://www.coindesk.com/arc/outboundfeeds/rss/', 'rss'),
         ]
     },
     'politics': {
         'name': 'Politics',
         'sources': [
-            ('Reddit Politics', 'https://www.reddit.com/r/politics/hot.json?limit=15'),
+            ('CNBC Politics', 'https://www.cnbc.com/id/10000104/device/rss/rss.html', 'rss'),
+            ('Yahoo News', 'https://www.yahoo.com/news/rss/politics', 'rss'),
         ]
     },
     'world': {
         'name': 'World News',
         'sources': [
-            ('Reddit WorldNews', 'https://www.reddit.com/r/worldnews/hot.json?limit=15'),
+            ('CNBC World', 'https://www.cnbc.com/id/100727362/device/rss/rss.html', 'rss'),
+            ('Yahoo World', 'https://www.yahoo.com/news/rss/world', 'rss'),
         ]
     },
 }
@@ -1585,8 +1983,72 @@ def fetch_reddit_posts(subreddit_url: str, limit: int = 10) -> List[Dict]:
     return []
 
 
+def fetch_rss_feed(rss_url: str, limit: int = 10) -> List[Dict]:
+    """Fetch articles from an RSS feed (free, no key required)
+    
+    Supports Bloomberg RSS feeds and other standard RSS 2.0 feeds.
+    
+    Args:
+        rss_url: RSS feed URL
+        limit: Maximum number of articles
+    
+    Returns:
+        List of articles
+    """
+    try:
+        req = urllib.request.Request(rss_url, headers={
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        })
+        
+        with urllib.request.urlopen(req, timeout=10) as response:
+            rss_content = response.read().decode('utf-8')
+        
+        # Parse RSS XML
+        root = ET.fromstring(rss_content)
+        articles = []
+        
+        # Find all <item> elements (RSS 2.0 standard)
+        for item in root.findall('.//item')[:limit]:
+            title_elem = item.find('title')
+            link_elem = item.find('link')
+            desc_elem = item.find('description')
+            pub_date = item.find('pubDate')
+            
+            # Clean up title (remove CDATA if present)
+            title = title_elem.text if title_elem is not None and title_elem.text else 'No title'
+            title = title.replace('<![CDATA[', '').replace(']]>', '').strip()
+            
+            # Get link
+            link = link_elem.text if link_elem is not None and link_elem.text else ''
+            
+            # Get description (summary)
+            description = ''
+            if desc_elem is not None and desc_elem.text:
+                description = desc_elem.text.replace('<![CDATA[', '').replace(']]>', '').strip()
+                # Remove HTML tags from description
+                description = re.sub(r'<[^>]+>', '', description)
+                description = description[:200] + '...' if len(description) > 200 else description
+            
+            # Get publication date
+            pub_date_str = pub_date.text if pub_date is not None and pub_date.text else ''
+            
+            articles.append({
+                'title': title,
+                'link': link,
+                'description': description,
+                'pub_date': pub_date_str,
+                'source': 'RSS',
+            })
+        
+        return articles
+    except Exception:
+        pass
+    
+    return []
+
+
 def get_news(category: str = 'business', use_cache: bool = True) -> List[Dict]:
-    """Get news headlines for a category (from Reddit)
+    """Get news headlines for a category (from Reddit and RSS feeds including Bloomberg)
     
     Args:
         category: News category (business, stocks, crypto, politics, world)
@@ -1603,25 +2065,31 @@ def get_news(category: str = 'business', use_cache: bool = True) -> List[Dict]:
         if time.time() - cache_time < NEWS_CACHE_DURATION:
             return cached_data
     
-    # Map category to subreddit
-    category_map = {
-        'business': 'business',
-        'stocks': 'stocks',
-        'crypto': 'CryptoCurrency',
-        'politics': 'politics',
-        'world': 'worldnews',
-    }
+    all_articles = []
     
-    subreddit = category_map.get(category, category)
-    url = f"https://www.reddit.com/r/{subreddit}/hot.json?limit=15"
-    
-    articles = fetch_reddit_posts(url, limit=15)
+    # Fetch from all sources in NEWS_SOURCES
+    if category in NEWS_SOURCES:
+        source_config = NEWS_SOURCES[category]
+        for source_name, url, source_type in source_config['sources']:
+            try:
+                if source_type == 'reddit':
+                    articles = fetch_reddit_posts(url, limit=10)
+                    for article in articles:
+                        article['source_name'] = source_name
+                    all_articles.extend(articles)
+                elif source_type == 'rss':
+                    articles = fetch_rss_feed(url, limit=10)
+                    for article in articles:
+                        article['source_name'] = source_name
+                    all_articles.extend(articles)
+            except Exception:
+                pass  # Continue with other sources if one fails
     
     # Cache results
-    if articles:
-        _news_cache[cache_key] = (articles, time.time())
+    if all_articles:
+        _news_cache[cache_key] = (all_articles, time.time())
     
-    return articles
+    return all_articles
 
 
 def get_reddit_news(category: str = 'stocks', use_cache: bool = True) -> List[Dict]:
@@ -1665,7 +2133,176 @@ def get_all_news() -> Dict[str, List[Dict]]:
     }
 
 
-import urllib.parse
+def fetch_full_article(url: str) -> str:
+    """Fetch and extract clean article content from a news URL
+    
+    Removes ads, navigation, and other non-content elements for a clean reading experience.
+    
+    Args:
+        url: URL of the news article
+        
+    Returns:
+        Clean article text content
+    """
+    try:
+        req = urllib.request.Request(url, headers={
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Cache-Control': 'no-cache',
+        })
+        
+        with urllib.request.urlopen(req, timeout=15) as response:
+            html_content = response.read().decode('utf-8', errors='ignore')
+        
+        # Remove unwanted sections (ads, nav, etc.)
+        remove_patterns = [
+            r'<script[^>]*>.*?</script>',
+            r'<style[^>]*>.*?</style>',
+            r'<nav[^>]*>.*?</nav>',
+            r'<footer[^>]*>.*?</footer>',
+            r'<header[^>]*>.*?</header>',
+            r'<aside[^>]*>.*?</aside>',
+            r'<form[^>]*>.*?</form>',
+            r'<iframe[^>]*>.*?</iframe>',
+            r'<noscript[^>]*>.*?</noscript>',
+            r'<!--.*?-->',
+            r'<div[^>]*class="[^"]*ad[^"]*"[^>]*>.*?</div>',
+            r'<div[^>]*class="[^"]*advertisement[^"]*"[^>]*>.*?</div>',
+            r'<div[^>]*class="[^"]*promo[^"]*"[^>]*>.*?</div>',
+            r'<div[^>]*class="[^"]*sponsor[^"]*"[^>]*>.*?</div>',
+            r'<div[^>]*class="[^"]*newsletter[^"]*"[^>]*>.*?</div>',
+            r'<div[^>]*class="[^"]*social[^"]*"[^>]*>.*?</div>',
+            r'<div[^>]*class="[^"]*share[^"]*"[^>]*>.*?</div>',
+            r'<div[^>]*class="[^"]*related[^"]*"[^>]*>.*?</div>',
+            r'<div[^>]*class="[^"]*recommend[^"]*"[^>]*>.*?</div>',
+            r'<div[^>]*id="[^"]*ad[^"]*"[^>]*>.*?</div>',
+            r'<div[^>]*id="[^"]*promo[^"]*"[^>]*>.*?</div>',
+        ]
+        
+        for pattern in remove_patterns:
+            html_content = re.sub(pattern, '', html_content, flags=re.DOTALL | re.IGNORECASE)
+        
+        # Extract text from paragraph tags
+        paragraphs = re.findall(r'<p[^>]*>(.*?)</p>', html_content, flags=re.DOTALL | re.IGNORECASE)
+        
+        # Patterns to filter out ad-like and promotional content
+        ad_patterns = [
+            r'^(click|sign up|subscribe|follow us|share|tweet|facebook|twitter|linkedin)',
+            r'^(menu|livestream|watch live|watch now|live tv)',
+            r'(advertisement|sponsored|promoted|partner content)',
+            r'(cookie|privacy policy|terms of use|accept cookies)',
+            r'(download our app|get the app|available on)',
+            r'(follow @|follow us on|connect with us)',
+            r'(sign up for|subscribe to|register for)',
+            r'(your browser|enable javascript|ad blocker)',
+            r'(©|copyright|all rights reserved)',
+            r'(click here|tap here|read more)',
+            r'(also read|you may also|recommended|trending)',
+            r'(source:|image:|photo:|credit:)',
+            r'(reporting by|editing by|additional reporting)',
+            r'(getty images|istock|ap photo|reuters)',
+            r'(a version of this article)',
+        ]
+        
+        def clean_text(text):
+            """Clean and normalize text"""
+            # Remove HTML tags
+            text = re.sub(r'<[^>]+>', '', text)
+            # Decode HTML entities
+            text = text.replace('&nbsp;', ' ').replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
+            text = text.replace('&quot;', '"').replace('&#39;', "'").replace('&apos;', "'")
+            text = text.replace('&#8217;', "'").replace('&#8216;', "'").replace('&#8220;', '"').replace('&#8221;', '"')
+            text = text.replace('&#8212;', '—').replace('&#8211;', '–').replace('&#8230;', '...')
+            text = text.replace('&#x27;', "'").replace('&#x2014;', '—').replace('&#x2019;', "'")
+            # Clean whitespace
+            text = ' '.join(text.split())
+            return text.strip()
+        
+        def is_ad_content(text):
+            """Check if text looks like an ad or promotional content"""
+            text_lower = text.lower()
+            for pattern in ad_patterns:
+                if re.search(pattern, text_lower):
+                    return True
+            # Skip very short paragraphs that look like headers/captions
+            if len(text) < 50 and not text.endswith('.'):
+                return True
+            # Skip if looks like a menu item (very few words)
+            words = text.split()
+            if len(words) <= 4 and not text.endswith('.'):
+                return True
+            return False
+        
+        # Process paragraphs
+        article_text = []
+        for p in paragraphs:
+            text = clean_text(p)
+            # Skip empty, too short, or ad-like content
+            if len(text) < 70:
+                continue
+            if is_ad_content(text):
+                continue
+            article_text.append(text)
+        
+        # Remove duplicate paragraphs
+        seen = set()
+        unique_text = []
+        for text in article_text:
+            # Use first 50 chars as signature to detect near-duplicates
+            sig = text[:50].lower()
+            if sig not in seen:
+                seen.add(sig)
+                unique_text.append(text)
+        
+        if unique_text:
+            return '\n\n'.join(unique_text)
+        
+        # Fallback: try article tag content
+        article_match = re.search(r'<article[^>]*>(.*?)</article>', html_content, flags=re.DOTALL | re.IGNORECASE)
+        if article_match:
+            article_html = article_match.group(1)
+            paragraphs = re.findall(r'<p[^>]*>(.*?)</p>', article_html, flags=re.DOTALL | re.IGNORECASE)
+            article_text = []
+            for p in paragraphs:
+                text = clean_text(p)
+                if len(text) >= 70 and not is_ad_content(text):
+                    article_text.append(text)
+            if article_text:
+                return '\n\n'.join(article_text)
+        
+        return "Unable to extract article content. Press 'O' to open in browser."
+        
+    except urllib.error.HTTPError as e:
+        return f"Unable to load article (HTTP {e.code}). Press 'O' to open in browser."
+    except urllib.error.URLError as e:
+        return f"Unable to load article ({e.reason}). Press 'O' to open in browser."
+    except Exception as e:
+        return f"Unable to load article. Press 'O' to open in browser."
+
+
+# Article content cache
+_article_content_cache: Dict[str, Tuple[str, float]] = {}
+ARTICLE_CACHE_DURATION = 600  # 10 minutes
+
+
+def get_cached_article_content(url: str) -> str:
+    """Get article content with caching
+    
+    Args:
+        url: Article URL
+        
+    Returns:
+        Article content (cached if available)
+    """
+    if url in _article_content_cache:
+        cached_content, cache_time = _article_content_cache[url]
+        if time.time() - cache_time < ARTICLE_CACHE_DURATION:
+            return cached_content
+    
+    content = fetch_full_article(url)
+    _article_content_cache[url] = (content, time.time())
+    return content
 
 
 def update_prices(data: Dict) -> Dict:
@@ -1697,7 +2334,7 @@ class BloombergTerminal:
         self.api_status = "CONNECTING..."  # Track API status
         self.last_fetch_time = None
         self.fetch_errors = []  # Track which APIs failed
-        self.view_mode = "main"  # Current view: "main", "history", "asset", "chart", "news"
+        self.view_mode = "main"  # Current view: "main", "history", "asset", "chart", "news", "heatmap", "alerts", "watchlist", "calendar"
         
         # Chart data storage
         self.chart_data = None  # Current chart data to display
@@ -1708,6 +2345,19 @@ class BloombergTerminal:
         self.news_data = []  # Current news articles to display
         self.news_category = "business"  # Current news category
         self.news_source = "rss"  # "rss" or "reddit"
+        self.selected_article = None  # Currently selected article index
+        self.article_detail_mode = False  # Whether showing article detail
+        self.article_scroll_offset = 0  # Scroll offset for article content
+        self.article_content = ""  # Full article content
+        self.article_loading = False  # Whether article is being fetched
+        self.article_content_lines = []  # Article content split into lines
+        
+        # Fear & Greed Index
+        self.fear_greed_data = None
+        self.fear_greed_last_fetch = 0
+        
+        # Market sentiment
+        self.market_sentiment = None
         
         # Setup curses
         self.setup()
@@ -2168,84 +2818,482 @@ class BloombergTerminal:
         self.screen.refresh()
     
     def render_news(self):
-        """Render the news headlines view"""
+        """Render the news headlines view with clean, minimal design"""
         self.screen.clear()
         self.height, self.width = self.screen.getmaxyx()
         y = 0
         
-        # Header
-        self.draw_header(y)
-        y += 5
+        # Check if showing article detail
+        if self.article_detail_mode and self.selected_article is not None:
+            self.render_article_detail()
+            return
         
-        # Title with category
+        # Minimal header - just category name
         category_name = NEWS_SOURCES.get(self.news_category, {}).get('name', self.news_category.upper())
-        source_name = "Reddit" if self.news_source == "reddit" else "RSS Feeds"
         
-        self.draw_line(y, "═" * (self.width - 1), COLOR_AMBER, bold=True)
-        title = f"★ NEWS: {category_name} ({source_name}) ★"
-        self.draw_text(y + 1, 2, title, COLOR_YELLOW, bold=True)
-        self.draw_text(y + 1, self.width - 35, "news <category> | reddit <sub>", COLOR_DIM)
-        self.draw_line(y + 2, "═" * (self.width - 1), COLOR_AMBER, bold=True)
-        y += 4
-        
-        # Categories help
-        cats = "Categories: business | stocks | crypto | politics | world"
-        self.draw_text(y, 2, cats, COLOR_CYAN)
-        y += 1
-        reddit_cats = "Reddit: wsb | stocks | crypto | politics | economy"
-        self.draw_text(y, 2, reddit_cats, COLOR_DIM)
+        # Top line with category
+        self.draw_text(y, 2, category_name, COLOR_CYAN)
+        self.draw_text(y, 4 + len(category_name), "  •  ↑↓ to select  •  O to read", COLOR_DIM)
         y += 2
         
-        # Render news
+        # Subtle separator
+        self.draw_text(y, 2, "─" * 3, COLOR_DIM)
+        y += 2
+        
+        # Render news with selection highlighting
         if self.news_data:
             for i, item in enumerate(self.news_data):
-                if y >= self.height - 4:
+                if y >= self.height - 3:
                     break
                 
-                if self.news_source == "reddit":
-                    # Reddit format
-                    title = item.get('title', 'No title')[:self.width - 20]
-                    score = item.get('score', 0)
-                    comments = item.get('comments', 0)
-                    subreddit = item.get('subreddit', '')
-                    
-                    # Title
-                    self.draw_text(y, 2, f"{i+1}.", COLOR_DIM)
-                    self.draw_text(y, 5, title, COLOR_WHITE, bold=True)
-                    y += 1
-                    
-                    # Meta
-                    meta = f"   r/{subreddit} | ↑{score} | 💬{comments}"
-                    self.draw_text(y, 5, meta, COLOR_DIM)
-                    y += 2
+                # Highlight selected article
+                is_selected = (self.selected_article == i)
+                
+                # Get article info
+                title = item.get('title', 'No title')[:self.width - 8]
+                source = item.get('source_name', item.get('source', 'Unknown'))
+                pub_date = item.get('pub_date', item.get('pubDate', ''))[:10]
+                
+                # Selection indicator
+                if is_selected:
+                    self.draw_text(y, 1, "▶", COLOR_AMBER)
+                    title_color = COLOR_WHITE
                 else:
-                    # RSS format
-                    title = item.get('title', 'No title')[:self.width - 10]
-                    source = item.get('source_name', item.get('source', 'Unknown'))
-                    pub_date = item.get('pubDate', '')[:10]
-                    
-                    # Title
-                    self.draw_text(y, 2, f"{i+1}.", COLOR_DIM)
-                    self.draw_text(y, 5, title, COLOR_WHITE, bold=True)
-                    y += 1
-                    
-                    # Source and date
-                    meta = f"   {source} | {pub_date}"
-                    self.draw_text(y, 5, meta, COLOR_DIM)
-                    y += 2
+                    self.draw_text(y, 1, " ", COLOR_DIM)
+                    title_color = COLOR_WHITE
+                
+                # Number
+                self.draw_text(y, 3, f"{i+1}.", COLOR_DIM)
+                
+                # Title
+                self.draw_text(y, 6, title, title_color, bold=is_selected)
+                y += 1
+                
+                # Source and date - subtle
+                meta = f"  {source}"
+                if pub_date:
+                    meta += f"  •  {pub_date}"
+                self.draw_text(y, 6, meta, COLOR_DIM)
+                y += 2
         else:
-            self.draw_line(y, "Loading news... or no data available.", COLOR_DIM)
+            self.draw_text(y, 2, "Loading news...", COLOR_DIM)
             y += 1
-            self.draw_line(y, "Use: news <category> or reddit <subreddit>", COLOR_DIM)
+            self.draw_text(y, 2, "Use: news <category> (business, stocks, crypto, politics, world)", COLOR_DIM)
             y += 1
         
-        # Messages
-        y = self.draw_messages(max(y + 1, self.height - 6))
+        # Minimal footer
+        y = self.height - 2
+        self.draw_text(y, 2, "↑↓ Navigate  |  O Read article  |  Esc Back", COLOR_DIM)
         
-        # Command
-        self.draw_command(self.height - 3)
+        # Command line
+        self.draw_command(self.height - 1)
         
         self.screen.refresh()
+    
+    def render_article_detail(self):
+        """Render full article detail view with clean, minimal design"""
+        self.screen.clear()
+        self.height, self.width = self.screen.getmaxyx()
+        y = 0
+        
+        # Minimal header - just source and date
+        if self.selected_article is None or self.selected_article >= len(self.news_data):
+            self.article_detail_mode = False
+            return
+        
+        article = self.news_data[self.selected_article]
+        source = article.get('source_name', article.get('source', 'Unknown'))
+        pub_date = article.get('pub_date', article.get('pubDate', ''))
+        
+        # Top line - clear indicator this is terminal view
+        self.draw_text(y, 2, "📖 READING", COLOR_GREEN)
+        y += 1
+        
+        # Source and date line
+        self.draw_text(y, 2, source, COLOR_CYAN)
+        if pub_date:
+            self.draw_text(y, 4 + len(source), f"  •  {pub_date}", COLOR_DIM)
+        y += 2
+        
+        # Article title - prominent
+        title = article.get('title', 'No title')
+        title_lines = self._wrap_text(title, self.width - 4)
+        for line in title_lines[:4]:  # Max 4 lines for title
+            self.draw_text(y, 2, line, COLOR_WHITE, bold=True)
+            y += 1
+        y += 1
+        
+        # Subtle separator
+        self.draw_text(y, 2, "─" * 3, COLOR_DIM)
+        y += 2
+        
+        # Content area
+        content_start_y = y
+        content_end_y = self.height - 3  # Leave room for minimal footer
+        available_height = content_end_y - content_start_y
+        
+        # Show loading state or content
+        if self.article_loading:
+            self.draw_text(y, 2, "Loading article...", COLOR_DIM)
+        elif self.article_content:
+            # Render article content with scroll offset
+            total_lines = len(self.article_content_lines)
+            lines_to_show = self.article_content_lines[self.article_scroll_offset:self.article_scroll_offset + available_height]
+            
+            for i, line in enumerate(lines_to_show):
+                if content_start_y + i >= content_end_y:
+                    break
+                # Empty lines for paragraph breaks
+                if not line.strip():
+                    y += 1
+                    continue
+                self.draw_text(content_start_y + i, 2, line, COLOR_WHITE)
+            
+            # Minimal scroll indicator on right edge
+            if total_lines > available_height:
+                scroll_pct = self.article_scroll_offset / max(1, total_lines - available_height)
+                indicator_y = content_start_y + int(scroll_pct * (available_height - 1))
+                # Draw subtle scroll bar
+                for i in range(available_height):
+                    if i == indicator_y:
+                        self.draw_text(content_start_y + i, self.width - 2, "│", COLOR_AMBER)
+                    else:
+                        self.draw_text(content_start_y + i, self.width - 2, "│", COLOR_DIM)
+        else:
+            # No content loaded yet - show description as fallback
+            description = article.get('description', 'Loading...')
+            if not description:
+                description = 'Loading...'
+            desc_lines = self._wrap_text(description, self.width - 4)
+            for i, line in enumerate(desc_lines[:available_height]):
+                self.draw_text(content_start_y + i, 2, line, COLOR_DIM)
+        
+        # Minimal footer - just key hints
+        y = self.height - 2
+        self.draw_text(y, 2, "↑↓ Scroll  |  PgUp/PgDn Page  |  Esc Back", COLOR_DIM)
+        
+        # Command line
+        self.draw_command(self.height - 1)
+        
+        self.screen.refresh()
+    
+    def render_heat_map(self):
+        """Render market heat map view"""
+        self.screen.clear()
+        self.height, self.width = self.screen.getmaxyx()
+        y = 0
+        
+        # Title
+        self.draw_text(y, 2, "🔥 MARKET HEAT MAP", COLOR_YELLOW, bold=True)
+        self.draw_text(y, self.width - 30, "Top movers sorted by %", COLOR_DIM)
+        y += 2
+        
+        # Get heat map data
+        heat_map = get_market_heat_map(self.data)
+        
+        if heat_map:
+            # Split into gainers and losers
+            gainers = [h for h in heat_map if h['pct'] > 0][:10]
+            losers = [h for h in heat_map if h['pct'] < 0]
+            losers = sorted(losers, key=lambda x: x['pct'])[:10]  # Worst first
+            
+            # Draw gainers
+            self.draw_text(y, 2, "▲ GAINERS", COLOR_GREEN, bold=True)
+            y += 1
+            for h in gainers:
+                if y >= self.height - 12:
+                    break
+                # Heat indicator
+                heat_bar = "█" * h['heat']
+                self.draw_text(y, 2, f"{h['symbol']:8}", COLOR_WHITE, bold=True)
+                self.draw_text(y, 12, f"{h['pct']:+6.2f}%", COLOR_GREEN)
+                self.draw_text(y, 22, heat_bar, COLOR_GREEN)
+                y += 1
+            
+            y += 1
+            
+            # Draw losers
+            self.draw_text(y, 2, "▼ LOSERS", COLOR_RED, bold=True)
+            y += 1
+            for h in losers:
+                if y >= self.height - 8:
+                    break
+                heat_bar = "█" * (5 - h['heat'])
+                self.draw_text(y, 2, f"{h['symbol']:8}", COLOR_WHITE, bold=True)
+                self.draw_text(y, 12, f"{h['pct']:+6.2f}%", COLOR_RED)
+                self.draw_text(y, 22, heat_bar, COLOR_RED)
+                y += 1
+        else:
+            self.draw_text(y, 2, "Loading market data...", COLOR_DIM)
+        
+        # Fear & Greed Index
+        y = max(y + 2, self.height - 10)
+        self.draw_line(y, "─" * (self.width - 4), COLOR_DIM)
+        y += 1
+        
+        fng = get_fear_greed_index()
+        fng_value = fng['value']
+        fng_label = fng['classification']
+        
+        # Color based on value
+        if fng_value <= 25:
+            fng_color = COLOR_RED
+        elif fng_value <= 45:
+            fng_color = COLOR_YELLOW
+        elif fng_value <= 55:
+            fng_color = COLOR_WHITE
+        elif fng_value <= 75:
+            fng_color = COLOR_CYAN
+        else:
+            fng_color = COLOR_GREEN
+        
+        self.draw_text(y, 2, "FEAR & GREED INDEX", COLOR_AMBER, bold=True)
+        y += 1
+        self.draw_text(y, 2, f"Value: {fng_value}/100", fng_color)
+        self.draw_text(y, 20, f"│ {fng_label}", fng_color)
+        y += 1
+        
+        # Draw gauge
+        gauge_width = min(50, self.width - 10)
+        filled = int(gauge_width * fng_value / 100)
+        gauge = "█" * filled + "░" * (gauge_width - filled)
+        self.draw_text(y, 2, f"[{gauge}]", fng_color)
+        
+        # Footer
+        y = self.height - 2
+        self.draw_text(y, 2, "Esc Back  |  Commands: heatmap, alerts, watchlist, calendar", COLOR_DIM)
+        
+        # Command line
+        self.draw_command(self.height - 1)
+        self.screen.refresh()
+    
+    def render_alerts(self):
+        """Render alerts management view"""
+        self.screen.clear()
+        self.height, self.width = self.screen.getmaxyx()
+        y = 0
+        
+        # Title
+        self.draw_text(y, 2, "🔔 PRICE ALERTS", COLOR_YELLOW, bold=True)
+        self.draw_text(y, self.width - 35, "alert <sym> <price> above/below", COLOR_DIM)
+        y += 2
+        
+        # Get alerts
+        alerts = get_alerts(active_only=False)
+        
+        if alerts:
+            self.draw_text(y, 2, f"{'ID':<4} {'Symbol':<8} {'Target':<14} {'Condition':<8} {'Status':<12}", COLOR_CYAN)
+            y += 1
+            self.draw_line(y, "─" * (self.width - 4), COLOR_DIM)
+            y += 1
+            
+            for alert in alerts:
+                if y >= self.height - 6:
+                    break
+                
+                status = "✓ TRIGGERED" if alert['triggered'] else "○ ACTIVE"
+                status_color = COLOR_GREEN if alert['triggered'] else COLOR_AMBER
+                
+                self.draw_text(y, 2, f"{alert['id']:<4}", COLOR_DIM)
+                self.draw_text(y, 8, f"{alert['symbol']:<8}", COLOR_WHITE, bold=True)
+                self.draw_text(y, 18, f"${alert['target_price']:,.2f}", COLOR_WHITE)
+                self.draw_text(y, 34, f"{alert['condition']:<8}", COLOR_DIM)
+                self.draw_text(y, 45, status, status_color)
+                y += 1
+        else:
+            self.draw_text(y, 2, "No alerts set", COLOR_DIM)
+            y += 1
+            self.draw_text(y, 2, "Use: alert BTC 100000 above", COLOR_DIM)
+            y += 1
+            self.draw_text(y, 2, "     alert ETH 2000 below", COLOR_DIM)
+        
+        # Footer
+        y = self.height - 2
+        self.draw_text(y, 2, "Esc Back  |  alert <sym> <price> above/below  |  delalert <id>", COLOR_DIM)
+        
+        # Command line
+        self.draw_command(self.height - 1)
+        self.screen.refresh()
+    
+    def render_watchlist(self):
+        """Render watchlist view"""
+        self.screen.clear()
+        self.height, self.width = self.screen.getmaxyx()
+        y = 0
+        
+        # Title
+        self.draw_text(y, 2, "⭐ WATCHLIST", COLOR_YELLOW, bold=True)
+        self.draw_text(y, self.width - 25, "watch <sym> to add", COLOR_DIM)
+        y += 2
+        
+        # Get watchlist
+        symbols = get_watchlist()
+        
+        if symbols:
+            self.draw_text(y, 2, f"{'Symbol':<10} {'Price':<15} {'Change':<12} {'Trend':<10}", COLOR_CYAN)
+            y += 1
+            self.draw_line(y, "─" * (self.width - 4), COLOR_DIM)
+            y += 1
+            
+            for symbol in symbols:
+                if y >= self.height - 6:
+                    break
+                
+                if symbol in self.data:
+                    info = self.data[symbol]
+                    price = info.get('price', 0)
+                    pct = info.get('pct', 0)
+                    
+                    # Format price
+                    if price >= 1000:
+                        price_str = f"${price:,.0f}"
+                    elif price >= 1:
+                        price_str = f"${price:,.2f}"
+                    else:
+                        price_str = f"${price:.4f}"
+                    
+                    # Change color
+                    if pct > 0:
+                        change_str = f"+{pct:.2f}%"
+                        change_color = COLOR_GREEN
+                        trend = "▲"
+                    elif pct < 0:
+                        change_str = f"{pct:.2f}%"
+                        change_color = COLOR_RED
+                        trend = "▼"
+                    else:
+                        change_str = "0.00%"
+                        change_color = COLOR_DIM
+                        trend = "─"
+                    
+                    self.draw_text(y, 2, f"★ {symbol:<8}", COLOR_AMBER, bold=True)
+                    self.draw_text(y, 14, price_str, COLOR_WHITE)
+                    self.draw_text(y, 30, change_str, change_color)
+                    self.draw_text(y, 44, trend, change_color)
+                else:
+                    self.draw_text(y, 2, f"★ {symbol:<8}", COLOR_AMBER, bold=True)
+                    self.draw_text(y, 14, "Loading...", COLOR_DIM)
+                
+                y += 1
+        else:
+            self.draw_text(y, 2, "Watchlist is empty", COLOR_DIM)
+            y += 1
+            self.draw_text(y, 2, "Use: watch BTC  to add Bitcoin to your watchlist", COLOR_DIM)
+        
+        # Footer
+        y = self.height - 2
+        self.draw_text(y, 2, "Esc Back  |  watch <sym> to add  |  unwatch <sym> to remove", COLOR_DIM)
+        
+        # Command line
+        self.draw_command(self.height - 1)
+        self.screen.refresh()
+    
+    def render_calendar(self):
+        """Render economic calendar view"""
+        self.screen.clear()
+        self.height, self.width = self.screen.getmaxyx()
+        y = 0
+        
+        # Title
+        self.draw_text(y, 2, "📅 ECONOMIC CALENDAR", COLOR_YELLOW, bold=True)
+        self.draw_text(y, self.width - 20, "Next 14 days", COLOR_DIM)
+        y += 2
+        
+        # Get calendar
+        events = get_economic_calendar(14)
+        
+        if events:
+            self.draw_text(y, 2, f"{'Days':<6} {'Date':<12} {'Event':<40} {'Impact':<8} {'Forecast':<10}", COLOR_CYAN)
+            y += 1
+            self.draw_line(y, "─" * (self.width - 4), COLOR_DIM)
+            y += 1
+            
+            for event in events:
+                if y >= self.height - 6:
+                    break
+                
+                # Impact color
+                if event['impact'] == 'high':
+                    impact_color = COLOR_RED
+                    impact_marker = "●●●"
+                elif event['impact'] == 'medium':
+                    impact_color = COLOR_YELLOW
+                    impact_marker = "●●○"
+                else:
+                    impact_color = COLOR_DIM
+                    impact_marker = "●○○"
+                
+                days_str = f"{event['days_until']}d" if event['days_until'] > 0 else "TODAY"
+                if event['days_until'] == 0:
+                    days_color = COLOR_GREEN
+                elif event['days_until'] <= 3:
+                    days_color = COLOR_YELLOW
+                else:
+                    days_color = COLOR_WHITE
+                
+                self.draw_text(y, 2, days_str, days_color, bold=(event['days_until']==0))
+                self.draw_text(y, 10, event['date'], COLOR_DIM)
+                self.draw_text(y, 22, event['event'][:38], COLOR_WHITE)
+                self.draw_text(y, 62, impact_marker, impact_color)
+                self.draw_text(y, 70, event['forecast'], COLOR_DIM)
+                y += 1
+        else:
+            self.draw_text(y, 2, "No upcoming events in the next 14 days", COLOR_DIM)
+        
+        # Footer
+        y = self.height - 2
+        self.draw_text(y, 2, "Esc Back  |  ●●● High Impact  |  ●●○ Medium  |  ●○○ Low", COLOR_DIM)
+        
+        # Command line
+        self.draw_command(self.height - 1)
+        self.screen.refresh()
+    
+    def _wrap_text(self, text: str, max_width: int) -> List[str]:
+        """Wrap text to fit within max_width characters
+        
+        Args:
+            text: Text to wrap
+            max_width: Maximum line width
+            
+        Returns:
+            List of wrapped lines
+        """
+        lines = []
+        paragraphs = text.split('\n')
+        
+        for paragraph in paragraphs:
+            if not paragraph.strip():
+                lines.append('')
+                continue
+                
+            words = paragraph.split()
+            current_line = ""
+            
+            for word in words:
+                if len(current_line) + len(word) + 1 <= max_width:
+                    current_line += (' ' if current_line else '') + word
+                else:
+                    if current_line:
+                        lines.append(current_line)
+                    current_line = word
+            
+            if current_line:
+                lines.append(current_line)
+        
+        return lines
+    
+    def _fetch_article_content(self, url: str):
+        """Fetch article content in background thread"""
+        try:
+            content = get_cached_article_content(url)
+            self.article_content = content
+            self.article_content_lines = self._wrap_text(content, self.width - 4)
+            self.article_loading = False
+            self.add_message("Article loaded", "ok")
+        except Exception as e:
+            self.article_content = f"Error loading article: {str(e)}"
+            self.article_content_lines = self._wrap_text(self.article_content, self.width - 4)
+            self.article_loading = False
     
     def render(self):
         """Render the full terminal display"""
@@ -2262,6 +3310,26 @@ class BloombergTerminal:
         # Check if we should render news view
         if self.view_mode == "news":
             self.render_news()
+            return
+        
+        # Check if we should render heat map view
+        if self.view_mode == "heatmap":
+            self.render_heat_map()
+            return
+        
+        # Check if we should render alerts view
+        if self.view_mode == "alerts":
+            self.render_alerts()
+            return
+        
+        # Check if we should render watchlist view
+        if self.view_mode == "watchlist":
+            self.render_watchlist()
+            return
+        
+        # Check if we should render calendar view
+        if self.view_mode == "calendar":
+            self.render_calendar()
             return
         
         self.screen.clear()
@@ -2315,9 +3383,11 @@ class BloombergTerminal:
             return
         
         if parts[0] == "help":
-            self.add_message("Commands: view, chart, compare, history, bal, spot/futures, orders, news, reddit", "info")
+            self.add_message("Commands: view, chart, compare, history, bal, spot/futures, orders, news", "info")
             self.add_message("Spot: buy/sell <sym> <qty> [price] | Futures: long/short <sym> <qty> <lev>", "info")
-            self.add_message("News: news <category> | reddit <sub> | Categories: business, stocks, crypto, politics", "info")
+            self.add_message("News: news <cat> | ↑↓ to select | O to read | browser # for web", "info")
+            self.add_message("NEW: heatmap, alerts, alert <sym> <price> above/below, delalert <id>", "info")
+            self.add_message("NEW: watchlist, watch <sym>, unwatch <sym>, calendar, sentiment", "info")
         
         elif parts[0] == "view" and len(parts) > 1:
             sym = parts[1].upper()
@@ -2330,9 +3400,22 @@ class BloombergTerminal:
             self.add_message(f"Not found: {sym}", "err")
         
         elif parts[0] == "back":
-            self.focused = None
-            self.view_mode = "main"
-            self.add_message("Main view", "info")
+            if self.article_detail_mode:
+                # Return from article detail to news list
+                self.article_detail_mode = False
+                self.article_scroll_offset = 0
+                self.article_content = ""
+                self.article_content_lines = []
+                self.add_message("Back to news list", "info")
+            else:
+                self.focused = None
+                self.view_mode = "main"
+                self.article_detail_mode = False
+                self.selected_article = None
+                self.article_scroll_offset = 0
+                self.article_content = ""
+                self.article_content_lines = []
+                self.add_message("Main view", "info")
         
         elif parts[0] == "bal":
             # Show account balances
@@ -2753,41 +3836,196 @@ class BloombergTerminal:
             
             threading.Thread(target=fetch_news, daemon=True).start()
         
-        elif parts[0] == "reddit":
-            # Reddit command: reddit [subreddit]
-            # Subreddits: stocks, wallstreetbets, crypto, politics, economy
-            subreddit = parts[1].lower() if len(parts) > 1 else "stocks"
-            
-            # Map shortcuts
-            subreddit_map = {
-                'wsb': 'wallstreetbets',
-                'wallstreetbets': 'wallstreetbets',
-                'stocks': 'stocks',
-                'crypto': 'crypto',
-                'politics': 'politics',
-                'economy': 'economy',
-            }
-            
-            subreddit = subreddit_map.get(subreddit, subreddit)
-            
-            if subreddit not in REDDIT_SOURCES:
-                self.add_message(f"Invalid subreddit. Use: stocks, wsb, crypto, politics, economy", "err")
+        elif parts[0] == "open" or parts[0] == "view" or parts[0] == "read":
+            # View article in terminal: open [number] or view [number]
+            if not self.news_data:
+                self.add_message("No articles loaded. Use 'news <category>' first", "err")
                 return
             
-            self.news_category = subreddit
-            self.news_source = "reddit"
-            self.add_message(f"Fetching r/{subreddit} posts...", "info")
+            if len(parts) > 1:
+                try:
+                    article_num = int(parts[1])
+                    if 1 <= article_num <= len(self.news_data):
+                        self.selected_article = article_num - 1
+                        self.article_detail_mode = True
+                        self.article_scroll_offset = 0
+                        self.article_content = ""
+                        self.article_content_lines = []
+                        self.article_loading = True
+                        # Fetch in background thread
+                        article = self.news_data[self.selected_article]
+                        link = article.get('link', '')
+                        if link:
+                            def fetch_content():
+                                self._fetch_article_content(link)
+                            threading.Thread(target=fetch_content, daemon=True).start()
+                        self.add_message(f"Reading article #{article_num}", "info")
+                    else:
+                        self.add_message(f"Invalid article number. Use 1-{len(self.news_data)}", "err")
+                except ValueError:
+                    self.add_message("Usage: open <number> or view <number>", "err")
+            elif self.selected_article is not None:
+                # Open currently selected article in terminal
+                self.article_detail_mode = True
+                self.article_scroll_offset = 0
+                self.article_content = ""
+                self.article_content_lines = []
+                self.article_loading = True
+                article = self.news_data[self.selected_article]
+                link = article.get('link', '')
+                if link:
+                    def fetch_content():
+                        self._fetch_article_content(link)
+                    threading.Thread(target=fetch_content, daemon=True).start()
+                self.add_message(f"Reading article #{self.selected_article + 1}", "info")
+            else:
+                self.add_message("Select an article first (use arrows or type a number)", "err")
+        
+        elif parts[0] == "browser" or parts[0] == "web":
+            # Open article in browser: browser [number]
+            if not self.news_data:
+                self.add_message("No articles loaded. Use 'news <category>' first", "err")
+                return
             
-            def fetch_reddit():
-                posts = get_reddit_news(subreddit)
-                if posts:
-                    self.news_data = posts
-                    self.view_mode = "news"
-                    self.add_message(f"Loaded {len(posts)} posts", "ok")
+            if len(parts) > 1:
+                try:
+                    article_num = int(parts[1])
+                    if 1 <= article_num <= len(self.news_data):
+                        article = self.news_data[article_num - 1]
+                        link = article.get('link', '')
+                        if link:
+                            webbrowser.open(link)
+                            self.add_message(f"Opening article #{article_num} in browser...", "ok")
+                        else:
+                            self.add_message("No link available for this article", "err")
+                    else:
+                        self.add_message(f"Invalid article number. Use 1-{len(self.news_data)}", "err")
+                except ValueError:
+                    self.add_message("Usage: browser <number>", "err")
+            elif self.selected_article is not None:
+                # Open currently selected article in browser
+                article = self.news_data[self.selected_article]
+                link = article.get('link', '')
+                if link:
+                    webbrowser.open(link)
+                    self.add_message(f"Opening article #{self.selected_article + 1} in browser...", "ok")
                 else:
-                    self.add_message("Could not fetch Reddit posts. Try again later.", "err")
+                    self.add_message("No link available for this article", "err")
+            else:
+                self.add_message("Select an article first (use arrows or type a number)", "err")
+        
+        elif parts[0].isdigit():
+            # Number to select article: 1, 2, 3, etc.
+            if self.view_mode == "news" and self.news_data:
+                article_num = int(parts[0])
+                if 1 <= article_num <= len(self.news_data):
+                    self.selected_article = article_num - 1
+                    self.article_detail_mode = True
+                    self.add_message(f"Loading article #{article_num} in terminal...", "info")
+                    # Fetch full article content
+                    article = self.news_data[self.selected_article]
+                    link = article.get('link', '')
+                    if link:
+                        self.article_content = ""
+                        self.article_content_lines = []
+                        self.article_scroll_offset = 0
+                        self.article_loading = True
+                        # Fetch in background thread
+                        def fetch_content():
+                            self._fetch_article_content(link)
+                        threading.Thread(target=fetch_content, daemon=True).start()
+                else:
+                    self.add_message(f"Invalid article number. Use 1-{len(self.news_data)}", "err")
+            else:
+                self.add_message("Load news first with 'news <category>'", "err")
+        
+        # ─────────────────────────────────────────────────────────────────────────
+        # NEW FEATURES: Heat Map, Alerts, Watchlist, Calendar
+        # ─────────────────────────────────────────────────────────────────────────
+        
+        elif parts[0] == "heatmap":
+            # Show market heat map
+            self.view_mode = "heatmap"
+            self.add_message("Market Heat Map loaded", "ok")
+        
+        elif parts[0] == "alerts":
+            # Show alerts view
+            self.view_mode = "alerts"
+            self.add_message("Price Alerts view", "info")
+        
+        elif parts[0] == "alert":
+            # Add price alert: alert <symbol> <price> [above/below]
+            if len(parts) >= 3:
+                try:
+                    symbol = parts[1].upper()
+                    # Remove $ if present
+                    price_str = parts[2].replace('$', '').replace(',', '')
+                    target_price = float(price_str)
+                    condition = parts[3].lower() if len(parts) > 3 else "above"
+                    
+                    if condition not in ['above', 'below']:
+                        self.add_message("Condition must be 'above' or 'below'", "err")
+                        return
+                    
+                    alert_id = add_alert(symbol, target_price, condition)
+                    self.add_message(f"Alert #{alert_id}: {symbol} {condition} ${target_price:,.2f}", "ok")
+                except ValueError:
+                    self.add_message("Invalid price. Usage: alert <symbol> <price> [above/below]", "err")
+            else:
+                self.add_message("Usage: alert <symbol> <price> [above/below]", "err")
+        
+        elif parts[0] == "delalert":
+            # Delete alert: delalert <id>
+            if len(parts) >= 2:
+                try:
+                    alert_id = int(parts[1])
+                    if delete_alert(alert_id):
+                        self.add_message(f"Alert #{alert_id} deleted", "ok")
+                    else:
+                        self.add_message(f"Alert #{alert_id} not found", "err")
+                except ValueError:
+                    self.add_message("Usage: delalert <id>", "err")
+            else:
+                self.add_message("Usage: delalert <id>", "err")
+        
+        elif parts[0] == "watchlist" or parts[0] == "watch":
+            # watchlist - show watchlist view
+            # watch <sym> - add to watchlist
+            if len(parts) == 1:
+                self.view_mode = "watchlist"
+                self.add_message("Watchlist view", "info")
+            elif len(parts) >= 2:
+                symbol = parts[1].upper()
+                if add_to_watchlist(symbol):
+                    self.add_message(f"Added {symbol} to watchlist", "ok")
+                else:
+                    self.add_message(f"{symbol} already in watchlist", "info")
+        
+        elif parts[0] == "unwatch":
+            # Remove from watchlist: unwatch <symbol>
+            if len(parts) >= 2:
+                symbol = parts[1].upper()
+                if remove_from_watchlist(symbol):
+                    self.add_message(f"Removed {symbol} from watchlist", "ok")
+                else:
+                    self.add_message(f"{symbol} not in watchlist", "err")
+            else:
+                self.add_message("Usage: unwatch <symbol>", "err")
+        
+        elif parts[0] == "calendar":
+            # Show economic calendar
+            self.view_mode = "calendar"
+            self.add_message("Economic Calendar loaded", "ok")
+        
+        elif parts[0] == "sentiment":
+            # Show market sentiment analysis
+            fng = get_fear_greed_index()
+            self.add_message(f"Fear & Greed: {fng['value']}/100 ({fng['classification']})", "info")
             
-            threading.Thread(target=fetch_reddit, daemon=True).start()
+            # Analyze news sentiment if available
+            if self.news_data:
+                sentiment = get_news_sentiment(self.news_data)
+                self.add_message(f"News Sentiment: {sentiment['label']} ({sentiment['score']:+.2f})", "info")
         
         else:
             self.add_message(f"Unknown: {parts[0]}", "err")
@@ -2807,7 +4045,7 @@ class BloombergTerminal:
             return False
         
         # Enter - execute command
-        if ch == ord('\n') or ch == ord('\r'):
+        if ch == ord('\n') or ch == ord('\r') or ch == curses.KEY_ENTER:
             if self.command.strip():
                 self.process_command(self.command)
             self.command = ""
@@ -2816,13 +4054,109 @@ class BloombergTerminal:
         # Escape - clear command or go back
         elif ch == 27:
             self.command = ""
-            if self.view_mode == "history" or self.view_mode == "chart":
+            if self.article_detail_mode:
+                # Go back from article detail to news list
+                self.article_detail_mode = False
+                self.article_scroll_offset = 0
+                self.article_content = ""
+                self.article_content_lines = []
+            elif self.view_mode in ["history", "chart", "news", "heatmap", "alerts", "watchlist", "calendar"]:
                 self.view_mode = "main"
+                self.article_detail_mode = False
+                self.selected_article = None
+                self.article_scroll_offset = 0
+                self.article_content = ""
+                self.article_content_lines = []
             return True
         
         # Backspace
         elif ch == 127 or ch == 8 or ch == curses.KEY_BACKSPACE:
             self.command = self.command[:-1]
+            return True
+        
+        # Arrow keys for navigation in news view or scrolling in article detail
+        elif ch == curses.KEY_UP:
+            if self.article_detail_mode:
+                # Scroll up in article detail
+                if self.article_scroll_offset > 0:
+                    self.article_scroll_offset -= 1
+            elif self.view_mode == "news" and self.news_data:
+                if self.selected_article is None:
+                    self.selected_article = 0
+                elif self.selected_article > 0:
+                    self.selected_article -= 1
+            return True
+        
+        elif ch == curses.KEY_DOWN:
+            if self.article_detail_mode:
+                # Scroll down in article detail
+                content_height = self.height - 16  # Account for header, footer, etc.
+                max_scroll = max(0, len(self.article_content_lines) - content_height)
+                if self.article_scroll_offset < max_scroll:
+                    self.article_scroll_offset += 1
+            elif self.view_mode == "news" and self.news_data:
+                if self.selected_article is None:
+                    self.selected_article = 0
+                elif self.selected_article < len(self.news_data) - 1:
+                    self.selected_article += 1
+            return True
+        
+        # Page Up/Down for faster scrolling in article detail
+        elif ch == curses.KEY_PPAGE:  # Page Up
+            if self.article_detail_mode:
+                page_size = self.height - 16
+                self.article_scroll_offset = max(0, self.article_scroll_offset - page_size)
+            return True
+        
+        elif ch == curses.KEY_NPAGE:  # Page Down
+            if self.article_detail_mode:
+                page_size = self.height - 16
+                content_height = page_size
+                max_scroll = max(0, len(self.article_content_lines) - content_height)
+                self.article_scroll_offset = min(max_scroll, self.article_scroll_offset + page_size)
+            return True
+        
+        # Enter key in news view - show article detail
+        elif (ch == ord('\n') or ch == ord('\r') or ch == curses.KEY_ENTER) and self.view_mode == "news" and not self.command:
+            if self.selected_article is not None:
+                self.article_detail_mode = True
+                # Fetch full article content
+                article = self.news_data[self.selected_article]
+                link = article.get('link', '')
+                if link:
+                    self.article_content = ""
+                    self.article_content_lines = []
+                    self.article_scroll_offset = 0
+                    self.article_loading = True
+                    # Fetch in background thread
+                    def fetch_content():
+                        self._fetch_article_content(link)
+                    threading.Thread(target=fetch_content, daemon=True).start()
+            return True
+        
+        # O key - read article in terminal
+        elif ch == ord('O') or ch == ord('o'):
+            if len(self.command) == 0:
+                # In news list view - read selected article
+                if self.view_mode == "news" and self.selected_article is not None:
+                    self.article_detail_mode = True
+                    self.article_scroll_offset = 0
+                    self.article_content = ""
+                    self.article_content_lines = []
+                    self.article_loading = True
+                    article = self.news_data[self.selected_article]
+                    link = article.get('link', '')
+                    if link:
+                        def fetch_content():
+                            self._fetch_article_content(link)
+                        threading.Thread(target=fetch_content, daemon=True).start()
+                    self.add_message(f"Reading article in terminal...", "info")
+                    return True
+                # In article view - do nothing (already reading)
+                elif self.article_detail_mode:
+                    return True
+            # Add 'o' to command buffer if we got here
+            self.command += chr(ch)
             return True
         
         # Printable characters (including H)

@@ -27,9 +27,21 @@ python3 bloomberg_terminal.py
 | Key | Action |
 |-----|--------|
 | `Ctrl+C` | Exit terminal |
-| `Enter` | Execute command |
-| `ESC` | Clear current command |
+| `Enter` | Execute command / Open selected article |
+| `ESC` | Clear command / Go back |
 | `Backspace` | Delete last character |
+| `H` | Toggle trade history view |
+
+### News View Controls
+
+| Key | Action |
+|-----|--------|
+| `↑`/`↓` | Navigate articles / Scroll article content |
+| `PgUp`/`PgDn` | Scroll article by page |
+| `Enter` | Open selected article (full content) |
+| `O` | Open article in browser |
+| `Esc` | Back to news list / Main view |
+| `1-9` | Open article by number |
 
 ---
 
@@ -44,6 +56,41 @@ python3 bloomberg_terminal.py
 | `bal` | Show account balance (requires Binance API) | `bal` |
 | `buy <sym> <qty>` | Place buy order | `buy btc 0.1` |
 | `sell <sym> <qty>` | Place sell order | `sell eth 1` |
+
+### New Features Commands
+
+| Command | Description | Example |
+|---------|-------------|---------|
+| `heatmap` | Show market heat map with Fear & Greed | `heatmap` |
+| `alerts` | View all price alerts | `alerts` |
+| `alert <sym> <price> above/below` | Set price alert | `alert BTC 100000 above` |
+| `delalert <id>` | Delete alert | `delalert 1` |
+| `watchlist` | View your watchlist | `watchlist` |
+| `watch <sym>` | Add to watchlist | `watch BTC` |
+| `unwatch <sym>` | Remove from watchlist | `unwatch BTC` |
+| `calendar` | Show economic calendar | `calendar` |
+| `sentiment` | Show market sentiment analysis | `sentiment` |
+
+### News Commands
+
+| Command | Description | Example |
+|---------|-------------|---------|
+| `news <category>` | View news headlines | `news business`, `news crypto` |
+| `reddit <sub>` | View Reddit posts | `reddit stocks`, `reddit crypto` |
+| `open <#>` | Read article in terminal | `open 5` |
+| `view <#>` | Same as open (read in terminal) | `view 3` |
+| `browser <#>` | Open article in browser | `browser 5` |
+| `O` key | Open selected article in browser | (press O) |
+
+### News Categories
+
+| Category | Description |
+|----------|-------------|
+| `business` | Business news (CNBC, Yahoo Finance) |
+| `stocks` | Stock market news |
+| `crypto` | Cryptocurrency news (CoinTelegraph, CoinDesk) |
+| `politics` | Political news |
+| `world` | World news |
 
 ---
 
@@ -142,8 +189,17 @@ You can trust that any price shown is real data from APIs.
 ║  help          → Show commands                                ║
 ║  back          → Return to main view                          ║
 ╠══════════════════════════════════════════════════════════════╣
+║  NEW FEATURES                                                 ║
+║  heatmap       → Market heat map + Fear & Greed               ║
+║  alerts        → View price alerts                            ║
+║  alert <sym> <price> above/below → Set alert                  ║
+║  watchlist     → View your watchlist                          ║
+║  watch <sym>   → Add to watchlist                             ║
+║  calendar      → Economic calendar                            ║
+║  sentiment     → Market sentiment analysis                    ║
+╠══════════════════════════════════════════════════════════════╣
 ║  Ctrl+C        → Exit terminal                                ║
 ║  Enter         → Execute command                              ║
-║  ESC           → Clear input                                  ║
+║  ESC           → Clear input / Go back                        ║
 ╚══════════════════════════════════════════════════════════════╝
 ```

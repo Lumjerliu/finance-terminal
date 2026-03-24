@@ -14,8 +14,14 @@ This guide explains every feature of the Bloomberg-style financial terminal.
 6. [Spot Trading](#spot-trading)
 7. [Futures Trading](#futures-trading)
 8. [Trade History](#trade-history)
-9. [Keyboard Shortcuts](#keyboard-shortcuts)
-10. [Troubleshooting](#troubleshooting)
+9. [News Headlines](#news-headlines)
+10. [Market Heat Map](#market-heat-map)
+11. [Price Alerts](#price-alerts)
+12. [Watchlist](#watchlist)
+13. [Economic Calendar](#economic-calendar)
+14. [Sentiment Analysis](#sentiment-analysis)
+15. [Keyboard Shortcuts](#keyboard-shortcuts)
+16. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -492,6 +498,307 @@ Your trades are stored in two formats:
    - Human-readable backup
    - Can open in Excel/Sheets
    - Easy to export/share
+
+---
+
+## News Headlines
+
+### Viewing News
+
+```
+COMMAND> news business
+```
+
+This opens the news view showing headlines from multiple sources.
+
+### News Categories
+
+| Category | Description | Sources |
+|----------|-------------|---------|
+| `business` | Business news | CNBC Business, Yahoo Finance |
+| `stocks` | Stock market news | Yahoo Finance, CNBC Markets |
+| `crypto` | Cryptocurrency news | CoinTelegraph, CoinDesk |
+| `politics` | Political news | CNBC Politics, Yahoo News |
+| `world` | World news | CNBC World, Yahoo World |
+
+### News Sources
+
+The terminal fetches news from **verified professional sources** only:
+
+| Source | Type | Coverage |
+|--------|------|----------|
+| CNBC | RSS | Business, Markets, Politics, World |
+| Yahoo Finance | RSS | Business, Stocks |
+| CoinTelegraph | RSS | Cryptocurrency |
+| CoinDesk | RSS | Cryptocurrency |
+
+All sources are professional news organizations with editorial standards.
+
+### Why Not Bloomberg?
+
+Bloomberg blocks direct RSS access (403 Forbidden). The terminal uses CNBC and Yahoo Finance instead, which provide similar quality financial news for free.
+
+### Navigating News
+
+- Press `↑`/`↓` to navigate through articles
+- Press `Enter` to read the full article
+- Press `Esc` to return to main dashboard
+- Articles show source name and date/time
+
+### Viewing Full Articles
+
+There are **multiple ways** to read articles in the terminal:
+
+1. **Press Enter** on a selected article
+   - Fetches and displays the **full article content** in the terminal
+   - Use `↑`/`↓` to scroll line by line
+   - Use `PgUp`/`PgDn` to scroll page by page
+   - Press `Esc` or type `back` to return to list
+
+2. **Type the article number** (1, 2, 3, etc.)
+   - Shows full article content with scrolling support
+   - Same navigation as above
+
+3. **Type `open #` or `view #`**
+   - Same as above - reads article in terminal
+   - Example: `open 5` or `view 3`
+
+4. **Press `O` or type `browser #`** to open in browser
+   - Opens the article in your default web browser
+   - Useful if the terminal can't extract content
+   - Example: `browser 5`
+
+### Full Article View
+
+When viewing a full article, you'll see:
+
+- **Full title** (word-wrapped)
+- **Source** (CNBC, Yahoo Finance, CoinTelegraph, or CoinDesk)
+- **Date/Time** published
+- **Full article content** (scrolled with keyboard)
+- **Scroll indicator** showing position in article
+
+| Key | Action |
+|-----|--------|
+| `↑` | Scroll up one line |
+| `↓` | Scroll down one line |
+| `PgUp` | Scroll up one page |
+| `PgDn` | Scroll down one page |
+| `O` | Open in browser |
+| `Esc` | Back to news list |
+| `back` | Back to news list |
+| `open` | Open in browser |
+
+### Article Loading
+
+When you select an article:
+1. The terminal fetches the full content from the article URL
+2. A "Loading..." message appears while fetching
+3. Once loaded, the full text is displayed with scrolling support
+4. Content is cached for 10 minutes for faster re-access
+
+**Note:** Some websites may block content extraction. If the terminal cannot fetch the full article, it will show the summary/description instead, and you can press `O` to open in your browser.
+
+---
+
+## Market Heat Map
+
+The Market Heat Map provides a visual overview of market movers sorted by performance.
+
+### Opening the Heat Map
+
+```
+COMMAND> heatmap
+```
+
+### Understanding the Heat Map
+
+The heat map displays:
+
+1. **Gainers Section** (▲)
+   - Top 10 assets with positive price changes
+   - Green heat bars indicate strength of gains
+   - Sorted from highest to lowest percentage gain
+
+2. **Losers Section** (▼)
+   - Top 10 assets with negative price changes
+   - Red heat bars indicate strength of losses
+   - Sorted from worst to best performer
+
+3. **Fear & Greed Index**
+   - Crypto market sentiment indicator (0-100)
+   - 0-25: Extreme Fear (red)
+   - 26-45: Fear (yellow)
+   - 46-55: Neutral (white)
+   - 56-75: Greed (cyan)
+   - 76-100: Extreme Greed (green)
+
+### Use Cases
+
+- **Quick market scan**: See which assets are moving
+- **Sentiment check**: Use Fear & Greed to gauge market mood
+- **Opportunity spotting**: Find potential breakout or breakdown candidates
+
+---
+
+## Price Alerts
+
+Set price alerts to get notified when assets reach target prices.
+
+### Setting an Alert
+
+```
+COMMAND> alert BTC 100000 above
+Alert #1: BTC above $100,000.00
+```
+
+**Syntax:** `alert <symbol> <price> [above/below]`
+
+- `above`: Alert when price goes above target
+- `below`: Alert when price goes below target
+
+### Viewing Alerts
+
+```
+COMMAND> alerts
+```
+
+Shows all alerts with:
+- Alert ID
+- Symbol
+- Target price
+- Condition (above/below)
+- Status (ACTIVE or TRIGGERED)
+
+### Deleting an Alert
+
+```
+COMMAND> delalert 1
+Alert #1 deleted
+```
+
+### How Alerts Work
+
+- Alerts are stored in a local database (`alerts.db`)
+- When prices update, the terminal checks if any alerts are triggered
+- Triggered alerts are marked and remain visible for reference
+
+---
+
+## Watchlist
+
+Create a personalized list of assets to track closely.
+
+### Adding to Watchlist
+
+```
+COMMAND> watch BTC
+Added BTC to watchlist
+
+COMMAND> watch ETH
+Added ETH to watchlist
+```
+
+### Viewing Watchlist
+
+```
+COMMAND> watchlist
+```
+
+Shows your watchlist with:
+- Symbol with star (★)
+- Current price
+- Percentage change
+- Trend indicator (▲/▼)
+
+### Removing from Watchlist
+
+```
+COMMAND> unwatch BTC
+Removed BTC from watchlist
+```
+
+### Use Cases
+
+- Track your portfolio holdings
+- Monitor assets you're considering
+- Keep an eye on specific markets
+
+---
+
+## Economic Calendar
+
+View upcoming economic events that may impact markets.
+
+### Opening the Calendar
+
+```
+COMMAND> calendar
+```
+
+### Calendar Information
+
+Shows the next 14 days of economic events:
+
+| Column | Description |
+|--------|-------------|
+| Days | Days until event (TODAY for same day) |
+| Date | Event date |
+| Event | Name of economic indicator |
+| Impact | Importance level (●●● High, ●●○ Medium, ●○○ Low) |
+| Forecast | Expected value |
+
+### High-Impact Events
+
+Events marked with ●●● (high impact) typically cause significant market volatility:
+- Nonfarm Payrolls
+- CPI Inflation
+- FOMC Meetings
+- GDP Reports
+- Unemployment Rate
+
+### Use Cases
+
+- Plan trades around major events
+- Anticipate volatility periods
+- Stay informed on market-moving data
+
+---
+
+## Sentiment Analysis
+
+Get AI-powered analysis of market sentiment.
+
+### Checking Sentiment
+
+```
+COMMAND> sentiment
+Fear & Greed: 11/100 (Extreme Fear)
+News Sentiment: negative (-0.35)
+```
+
+### What It Shows
+
+1. **Fear & Greed Index**
+   - Crypto market sentiment (0-100)
+   - Based on volatility, momentum, social signals
+
+2. **News Sentiment** (if news is loaded)
+   - Analysis of article headlines
+   - Positive/negative/neutral classification
+   - Sentiment score (-1 to +1)
+
+### How Sentiment Analysis Works
+
+The terminal uses keyword analysis to detect sentiment:
+- **Positive words**: surge, rally, gain, bull, profit, growth
+- **Negative words**: crash, plunge, drop, bear, loss, decline
+
+### Use Cases
+
+- **Contrarian indicator**: Extreme fear may signal buying opportunity
+- **Trend confirmation**: Align sentiment with price action
+- **News impact**: Understand market reaction to news
 
 ---
 

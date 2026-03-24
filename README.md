@@ -8,18 +8,170 @@ A terminal-based real-time market data dashboard with Bloomberg-style aesthetics
 python3 bloomberg_terminal.py
 ```
 
+Press `Ctrl+C` to exit. Type `help` for commands.
+
+---
+
 ## Features
 
+### Core Features
 - **Real-time market data** from free APIs (no API keys required)
 - **Bloomberg-style UI** with black background and amber/green/red colors
 - **Instant keyboard response** using curses library
 - **Clear error states** - shows "NO DATA" when APIs fail
-- **Easy API swapping** - all APIs configured in one place
-- **Trade History** - record and view all your buys/sells with persistent storage
-- **Price Charts** - ASCII charts for historical price visualization
-- **Asset Comparison** - compare performance of two assets over time
+
+### Trading Features
 - **Spot Trading** - market and limit orders on Binance (requires API keys)
 - **Futures Trading** - leveraged long/short positions (requires API keys)
+- **Trade History** - record and view all your buys/sells with persistent storage
+
+### Analysis Features
+- **Price Charts** - ASCII charts for historical price visualization
+- **Asset Comparison** - compare performance of two assets over time
+- **Market Heat Map** - visual overview of top gainers and losers
+- **Fear & Greed Index** - crypto market sentiment indicator
+
+### Productivity Features
+- **Price Alerts** - get notified when prices hit targets
+- **Watchlist** - track your favorite assets
+- **Economic Calendar** - upcoming market-moving events
+- **News Reader** - read full articles in terminal
+- **Sentiment Analysis** - AI-powered news sentiment
+
+---
+
+## Codebase Architecture
+
+The entire application is in a single file: `bloomberg_terminal.py` (~4000 lines). Here's how it's organized:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    CODEBASE STRUCTURE                           │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  1. IMPORTS & CONFIGURATION (Lines 1-700)                       │
+│     ├── Standard library imports                                │
+│     ├── API_ENDPOINTS dict - all API configurations             │
+│     └── COLOR constants - terminal color scheme                 │
+│                                                                 │
+│  2. DATA FETCHING FUNCTIONS (Lines 700-1000)                    │
+│     ├── get_crypto_prices()      - Binance API                  │
+│     ├── get_metals_prices()      - Gold-API                     │
+│     ├── get_forex_rates()        - Frankfurter API              │
+│     ├── get_oil_price()          - FRED API                     │
+│     ├── get_stock_prices()       - Yahoo Finance                │
+│     ├── get_quick_prices()       - Aggregates all prices        │
+│     └── get_all_real_data()      - Async data fetcher           │
+│                                                                 │
+│  3. FEATURE FUNCTIONS (Lines 1000-1500)                         │
+│     ├── get_fear_greed_index()   - Crypto sentiment             │
+│     ├── add_alert() / get_alerts() / delete_alert()             │
+│     ├── add_to_watchlist() / get_watchlist()                    │
+│     ├── analyze_sentiment()      - News sentiment analysis      │
+│     ├── get_market_heat_map()    - Market movers                │
+│     └── get_economic_calendar()  - Upcoming events              │
+│                                                                 │
+│  4. TRADING FUNCTIONS (Lines 1500-2100)                         │
+│     ├── Spot: spot_market_buy(), spot_limit_sell(), etc.        │
+│     ├── Futures: futures_long(), futures_short(), etc.          │
+│     ├── record_trade() / get_trade_history()                    │
+│     └── Binance API signing & authentication                    │
+│                                                                 │
+│  5. NEWS FUNCTIONS (Lines 2100-2400)                            │
+│     ├── get_news()               - RSS feed fetcher             │
+│     ├── fetch_full_article()     - Article content extractor    │
+│     └── Article content cleaning & ad filtering                 │
+│                                                                 │
+│  6. CHART FUNCTIONS (Lines 2400-2700)                           │
+│     ├── get_price_history()      - CoinGecko historical data    │
+│     ├── generate_chart_lines()   - ASCII chart generator        │
+│     └── generate_comparison_chart()                             │
+│                                                                 │
+│  7. TERMINAL CLASS (Lines 2700-4200)                            │
+│     ├── __init__()               - Initialize state             │
+│     ├── render()                 - Main dashboard               │
+│     ├── render_heat_map()        - Heat map view                │
+│     ├── render_alerts()          - Alerts view                  │
+│     ├── render_watchlist()       - Watchlist view               │
+│     ├── render_calendar()        - Calendar view                │
+│     ├── render_news()            - News view                    │
+│     ├── render_chart()           - Chart view                   │
+│     ├── process_command()        - Command handler              │
+│     └── handle_input()           - Keyboard handler             │
+│                                                                 │
+│  8. MAIN ENTRY POINT (Lines 4200-end)                           │
+│     └── curses.wrapper(main)     - Start application            │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Key Classes and Functions
+
+| Component | Purpose | Location |
+|-----------|---------|----------|
+| `BloombergTerminal` | Main application class | Line ~2700 |
+| `API_ENDPOINTS` | All API configurations | Line ~50 |
+| `COLOR_*` constants | Terminal colors | Line ~695 |
+| `get_quick_prices()` | Fetch all market data | Line ~950 |
+| `process_command()` | Handle user commands | Line ~3377 |
+| `handle_input()` | Keyboard events | Line ~4031 |
+
+### Data Flow
+
+```
+┌──────────────┐     ┌──────────────────┐     ┌─────────────────┐
+│   APIs       │────▶│  get_quick_prices│────▶│  self.data dict │
+│  (External)  │     │  (Aggregator)    │     │  (In-memory)    │
+└──────────────┘     └──────────────────┘     └─────────────────┘
+                                                       │
+                                                       ▼
+┌──────────────┐     ┌──────────────────┐     ┌─────────────────┐
+│   Terminal   │◀────│    render()      │◀────│  Format prices  │
+│   Display    │     │  (Draw to screen)│     │  for display    │
+└──────────────┘     └──────────────────┘     └─────────────────┘
+```
+
+### Adding a New Feature
+
+1. **Add data function** (if needed) in section 3:
+```python
+def get_my_data() -> Dict:
+    """Fetch data from API"""
+    # Implementation
+    return data
+```
+
+2. **Add render method** in `BloombergTerminal` class:
+```python
+def render_my_feature(self):
+    """Render my feature view"""
+    self.screen.clear()
+    # Draw UI
+    self.screen.refresh()
+```
+
+3. **Add command handler** in `process_command()`:
+```python
+elif parts[0] == "myfeature":
+    self.view_mode = "myfeature"
+```
+
+4. **Add view mode check** in `render()`:
+```python
+if self.view_mode == "myfeature":
+    self.render_my_feature()
+    return
+```
+
+---
+
+## Database Files
+
+| File | Purpose | Schema |
+|------|---------|--------|
+| `trades.db` | Trade history | `trades(id, symbol, side, quantity, price, total, timestamp)` |
+| `alerts.db` | Price alerts | `alerts(id, symbol, target_price, condition, created_at, triggered)` |
+| `watchlist.db` | User watchlist | `watchlist(id, symbol, added_at, notes)` |
 
 ---
 
@@ -255,14 +407,31 @@ API_ENDPOINTS = {
 
 ```
 finance-terminal/
-├── bloomberg_terminal.py   # Main application
+├── bloomberg_terminal.py   # Main application (~4000 lines)
 ├── test_terminal.py        # Test suite
-├── trades.db               # SQLite database for trade history
-├── trade_history.csv       # CSV backup of all trades
-├── README.md               # This file
-├── SHORTCUTS.md            # Keyboard shortcuts
-└── requirements.txt        # Python dependencies (standard lib only)
+├── trades.db               # SQLite: trade history
+├── alerts.db               # SQLite: price alerts
+├── watchlist.db            # SQLite: user watchlist
+├── trade_history.csv       # CSV backup of trades
+├── README.md               # This file (architecture + usage)
+├── USAGE.md                # Detailed usage guide
+├── SHORTCUTS.md            # Quick reference
+└── requirements.txt        # Dependencies (standard lib only)
 ```
+
+---
+
+## Testing
+
+```bash
+python3 test_terminal.py
+```
+
+Tests:
+- API connectivity (Binance, Gold-API, Frankfurter, etc.)
+- Price formatting
+- Terminal class structure
+- No mock data verification
 
 ---
 
@@ -285,94 +454,7 @@ No external dependencies required - uses only Python standard library.
 | Stocks not loading | Yahoo Finance may be rate-limited, try later |
 | Oil not loading | FRED is sometimes slow, wait or use premium API |
 | Terminal not rendering | Ensure terminal is at least 80x30 characters |
-
----
-
-## Commands
-
-| Command | Description |
-|---------|-------------|
-| `help` | Show available commands |
-| `view <sym>` | Focus on a symbol |
-| `refresh` | Force data refresh |
-| `back` | Return to main view |
-| `chart <sym> <days>` | Show price chart for last N days |
-| `chart <sym> <start> <end>` | Show price chart for date range (YYYY-MM-DD) |
-| `compare <sym1> <sym2> <days>` | Compare two assets over N days |
-| `compare <sym1> <sym2> <start> <end>` | Compare two assets for date range |
-| `buy <sym> <qty>` | Record a buy trade at current market price |
-| `sell <sym> <qty>` | Record a sell trade at current market price |
-| `history` or `trades` | View trade history |
-| `delete <id>` | Delete a trade by ID |
-
-## Keyboard Shortcuts
-
-| Key | Action |
-|-----|--------|
-| `H` | Toggle trade history view |
-| `Esc` | Return to main view |
-| `Ctrl+C` | Exit terminal |
-
-## Price Charts & Comparisons
-
-View historical price data with ASCII charts directly in your terminal.
-
-### Single Asset Chart
-
-```
-COMMAND> chart BTC 30
-[Shows BTC price chart for last 30 days]
-
-COMMAND> chart ETH 2024-01-01 2024-03-01
-[Shows ETH price from Jan 1 to Mar 1, 2024]
-```
-
-### Compare Two Assets
-
-```
-COMMAND> compare BTC ETH 30
-[Shows percentage change comparison for last 30 days]
-
-COMMAND> compare BTC ETH 2024-01-01 2024-06-01
-[Shows comparison for date range]
-```
-
-### Supported Assets for Charts
-
-Charts work for crypto assets via CoinGecko API:
-- BTC, ETH, SOL, XRP, DOGE, ADA, AVAX, LINK, DOT, MATIC, LTC, UNI
-
-## Trade History
-
-Your trades are stored in two places:
-1. **SQLite Database** (`trades.db`) - Primary storage, supports queries
-2. **CSV File** (`trade_history.csv`) - Backup, easy to open in Excel
-
-### Example Usage
-
-```
-COMMAND> buy BTC 0.5
-BUY 0.5 BTC @ $85,000.00 = $42,500.00 (ID: 1)
-
-COMMAND> sell ETH 2
-SELL 2 ETH @ $3,200.00 = $6,400.00 (ID: 2)
-
-COMMAND> history
-[Shows trade history table]
-
-COMMAND> delete 1
-Deleted trade #1
-```
-
-Press `Ctrl+C` to exit.
-
----
-
-## Testing
-
-```bash
-python3 test_terminal.py
-```
+| Article not loading | Some sites block scraping, press `O` to open in browser |
 
 ---
 
