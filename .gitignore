@@ -17,6 +17,10 @@ build/
 trades.db
 trade_history.csv
 
+# Trading config (NEVER commit API keys!)
+trading_config.py
+trading_config.pyc
+
 # IDE
 .idea/
 .vscode/

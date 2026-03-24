@@ -22,6 +22,9 @@ import urllib.request
 import urllib.error
 import sqlite3
 import csv
+import hashlib
+import hmac
+import base64
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # API CONFIGURATION - Easy to swap APIs
@@ -107,6 +110,424 @@ API_ENDPOINTS = {
         }
     },
 }
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# BINANCE TRADING CONFIGURATION
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# To enable trading, you need Binance API keys with trading permissions.
+#
+# SECURITY WARNING: 
+# - NEVER commit API keys to git
+# - Use environment variables or a separate config file
+# - Use API keys with IP whitelist restriction
+# - For futures, enable futures permission in Binance API settings
+#
+# Setup:
+# 1. Create API key at https://www.binance.com/en/my/settings/api-management
+# 2. Enable "Enable Spot & Margin Trading" for spot trading
+# 3. Enable "Enable Futures" for futures trading
+# 4. Set IP whitelist for security
+# 5. Export keys as environment variables:
+#    export BINANCE_API_KEY="your_api_key"
+#    export BINANCE_API_SECRET="your_secret_key"
+#
+# Or create a file 'trading_config.py' with:
+#    BINANCE_API_KEY = "your_api_key"
+#    BINANCE_API_SECRET = "your_secret_key"
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Load API keys from environment or config file
+BINANCE_API_KEY = os.environ.get('BINANCE_API_KEY', '')
+BINANCE_API_SECRET = os.environ.get('BINANCE_API_SECRET', '')
+
+# Try to load from config file if env vars not set
+if not BINANCE_API_KEY:
+    try:
+        from trading_config import BINANCE_API_KEY as _key, BINANCE_API_SECRET as _secret
+        BINANCE_API_KEY = _key
+        BINANCE_API_SECRET = _secret
+    except ImportError:
+        pass
+
+# Trading settings
+TRADING_ENABLED = bool(BINANCE_API_KEY and BINANCE_API_SECRET)
+BINANCE_SPOT_URL = "https://api.binance.com"
+BINANCE_FUTURES_URL = "https://fapi.binance.com"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# BINANCE TRADING FUNCTIONS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def binance_signature(query_string: str) -> str:
+    """Generate HMAC SHA256 signature for Binance API"""
+    return hmac.new(
+        BINANCE_API_SECRET.encode('utf-8'),
+        query_string.encode('utf-8'),
+        hashlib.sha256
+    ).hexdigest()
+
+
+def binance_request(method: str, endpoint: str, params: dict = None, futures: bool = False) -> Optional[dict]:
+    """Make authenticated request to Binance API
+    
+    Args:
+        method: HTTP method ('GET', 'POST', 'DELETE')
+        endpoint: API endpoint (e.g., '/api/v3/order')
+        params: Request parameters
+        futures: Use futures API instead of spot
+    """
+    if not TRADING_ENABLED:
+        return None
+    
+    base_url = BINANCE_FUTURES_URL if futures else BINANCE_SPOT_URL
+    
+    # Add timestamp
+    if params is None:
+        params = {}
+    params['timestamp'] = int(time.time() * 1000)
+    
+    # Build query string
+    query_string = '&'.join([f"{k}={v}" for k, v in sorted(params.items())])
+    
+    # Add signature
+    signature = binance_signature(query_string)
+    query_string += f"&signature={signature}"
+    
+    # Build URL
+    url = f"{base_url}{endpoint}?{query_string}"
+    
+    headers = {
+        'X-MBX-APIKEY': BINANCE_API_KEY,
+        'Content-Type': 'application/json'
+    }
+    
+    try:
+        req = urllib.request.Request(url, headers=headers, method=method)
+        with urllib.request.urlopen(req, timeout=10) as response:
+            return json.loads(response.read().decode())
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode() if e.fp else ''
+        return {'error': True, 'code': e.code, 'message': error_body}
+    except Exception as e:
+        return {'error': True, 'message': str(e)}
+
+
+def get_spot_balance() -> Optional[List[dict]]:
+    """Get spot account balance"""
+    result = binance_request('GET', '/api/v3/account')
+    
+    if result and 'balances' in result:
+        # Filter non-zero balances
+        balances = []
+        for b in result['balances']:
+            free = float(b['free'])
+            locked = float(b['locked'])
+            if free > 0 or locked > 0:
+                balances.append({
+                    'asset': b['asset'],
+                    'free': free,
+                    'locked': locked,
+                    'total': free + locked
+                })
+        return sorted(balances, key=lambda x: x['total'], reverse=True)
+    return None
+
+
+def get_futures_balance() -> Optional[List[dict]]:
+    """Get futures account balance"""
+    result = binance_request('GET', '/fapi/v2/balance', futures=True)
+    
+    if result and isinstance(result, list):
+        # Filter non-zero balances
+        balances = []
+        for b in result:
+            balance = float(b['balance'])
+            if balance > 0:
+                balances.append({
+                    'asset': b['asset'],
+                    'balance': balance,
+                    'available': float(b['availableBalance']),
+                    'cross_wallet': float(b['crossWalletBalance']),
+                    'cross_un pnl': float(b['crossUnPnl'])
+                })
+        return balances
+    return None
+
+
+def get_futures_positions() -> Optional[List[dict]]:
+    """Get open futures positions"""
+    result = binance_request('GET', '/fapi/v2/positionRisk', futures=True)
+    
+    if result and isinstance(result, list):
+        positions = []
+        for p in result:
+            position_amt = float(p['positionAmt'])
+            if position_amt != 0:
+                positions.append({
+                    'symbol': p['symbol'],
+                    'position_amt': position_amt,
+                    'entry_price': float(p['entryPrice']),
+                    'mark_price': float(p['markPrice']),
+                    'unrealized_pnl': float(p['unRealizedProfit']),
+                    'liquidation_price': float(p['liquidationPrice']),
+                    'leverage': int(p['leverage']),
+                    'margin_type': p['marginType'],
+                    'side': 'LONG' if position_amt > 0 else 'SHORT'
+                })
+        return positions
+    return None
+
+
+def set_leverage(symbol: str, leverage: int) -> Optional[dict]:
+    """Set leverage for futures trading
+    
+    Args:
+        symbol: Trading pair (e.g., 'BTCUSDT')
+        leverage: Leverage multiplier (1-125)
+    """
+    return binance_request('POST', '/fapi/v1/leverage', 
+                          {'symbol': symbol.upper(), 'leverage': leverage}, 
+                          futures=True)
+
+
+def spot_market_buy(symbol: str, quantity: float) -> Optional[dict]:
+    """Execute spot market buy order
+    
+    Args:
+        symbol: Trading pair (e.g., 'BTCUSDT')
+        quantity: Quantity to buy
+    """
+    params = {
+        'symbol': symbol.upper(),
+        'side': 'BUY',
+        'type': 'MARKET',
+        'quantity': quantity
+    }
+    return binance_request('POST', '/api/v3/order', params)
+
+
+def spot_market_sell(symbol: str, quantity: float) -> Optional[dict]:
+    """Execute spot market sell order
+    
+    Args:
+        symbol: Trading pair (e.g., 'BTCUSDT')
+        quantity: Quantity to sell
+    """
+    params = {
+        'symbol': symbol.upper(),
+        'side': 'SELL',
+        'type': 'MARKET',
+        'quantity': quantity
+    }
+    return binance_request('POST', '/api/v3/order', params)
+
+
+def spot_limit_buy(symbol: str, quantity: float, price: float) -> Optional[dict]:
+    """Execute spot limit buy order
+    
+    Args:
+        symbol: Trading pair (e.g., 'BTCUSDT')
+        quantity: Quantity to buy
+        price: Limit price
+    """
+    params = {
+        'symbol': symbol.upper(),
+        'side': 'BUY',
+        'type': 'LIMIT',
+        'timeInForce': 'GTC',
+        'quantity': quantity,
+        'price': price
+    }
+    return binance_request('POST', '/api/v3/order', params)
+
+
+def spot_limit_sell(symbol: str, quantity: float, price: float) -> Optional[dict]:
+    """Execute spot limit sell order
+    
+    Args:
+        symbol: Trading pair (e.g., 'BTCUSDT')
+        quantity: Quantity to sell
+        price: Limit price
+    """
+    params = {
+        'symbol': symbol.upper(),
+        'side': 'SELL',
+        'type': 'LIMIT',
+        'timeInForce': 'GTC',
+        'quantity': quantity,
+        'price': price
+    }
+    return binance_request('POST', '/api/v3/order', params)
+
+
+def futures_market_long(symbol: str, quantity: float, leverage: int = 1) -> Optional[dict]:
+    """Open futures long position with market order
+    
+    Args:
+        symbol: Trading pair (e.g., 'BTCUSDT')
+        quantity: Quantity to buy
+        leverage: Leverage multiplier
+    """
+    # Set leverage first
+    set_leverage(symbol, leverage)
+    
+    params = {
+        'symbol': symbol.upper(),
+        'side': 'BUY',
+        'type': 'MARKET',
+        'quantity': quantity
+    }
+    return binance_request('POST', '/fapi/v1/order', params, futures=True)
+
+
+def futures_market_short(symbol: str, quantity: float, leverage: int = 1) -> Optional[dict]:
+    """Open futures short position with market order
+    
+    Args:
+        symbol: Trading pair (e.g., 'BTCUSDT')
+        quantity: Quantity to sell
+        leverage: Leverage multiplier
+    """
+    # Set leverage first
+    set_leverage(symbol, leverage)
+    
+    params = {
+        'symbol': symbol.upper(),
+        'side': 'SELL',
+        'type': 'MARKET',
+        'quantity': quantity
+    }
+    return binance_request('POST', '/fapi/v1/order', params, futures=True)
+
+
+def futures_close_position(symbol: str) -> Optional[dict]:
+    """Close all positions for a symbol (market order)
+    
+    Args:
+        symbol: Trading pair (e.g., 'BTCUSDT')
+    """
+    # Get current position
+    positions = get_futures_positions()
+    if not positions:
+        return {'error': True, 'message': 'No open positions'}
+    
+    position = None
+    for p in positions:
+        if p['symbol'] == symbol.upper():
+            position = p
+            break
+    
+    if not position:
+        return {'error': True, 'message': f'No position for {symbol}'}
+    
+    # Close with opposite order
+    quantity = abs(position['position_amt'])
+    side = 'SELL' if position['side'] == 'LONG' else 'BUY'
+    
+    params = {
+        'symbol': symbol.upper(),
+        'side': side,
+        'type': 'MARKET',
+        'quantity': quantity
+    }
+    return binance_request('POST', '/fapi/v1/order', params, futures=True)
+
+
+def get_open_orders(symbol: str = None, futures: bool = False) -> Optional[List[dict]]:
+    """Get open orders
+    
+    Args:
+        symbol: Trading pair (optional, returns all if not specified)
+        futures: Check futures orders instead of spot
+    """
+    params = {}
+    if symbol:
+        params['symbol'] = symbol.upper()
+    
+    endpoint = '/fapi/v1/openOrders' if futures else '/api/v3/openOrders'
+    result = binance_request('GET', endpoint, params, futures=futures)
+    
+    if result and isinstance(result, list):
+        orders = []
+        for o in result:
+            orders.append({
+                'order_id': o['orderId'],
+                'symbol': o['symbol'],
+                'side': o['side'],
+                'type': o['type'],
+                'price': float(o['price']),
+                'quantity': float(o['origQty']),
+                'filled': float(o['executedQty']),
+                'status': o['status'],
+                'time': datetime.fromtimestamp(o['time'] / 1000).strftime('%Y-%m-%d %H:%M:%S')
+            })
+        return orders
+    return None
+
+
+def cancel_order(symbol: str, order_id: int, futures: bool = False) -> Optional[dict]:
+    """Cancel an open order
+    
+    Args:
+        symbol: Trading pair
+        order_id: Order ID to cancel
+        futures: Cancel futures order
+    """
+    params = {
+        'symbol': symbol.upper(),
+        'orderId': order_id
+    }
+    endpoint = '/fapi/v1/order' if futures else '/api/v3/order'
+    return binance_request('DELETE', endpoint, params, futures=futures)
+
+
+def cancel_all_orders(symbol: str, futures: bool = False) -> Optional[dict]:
+    """Cancel all open orders for a symbol
+    
+    Args:
+        symbol: Trading pair
+        futures: Cancel futures orders
+    """
+    params = {'symbol': symbol.upper()}
+    endpoint = '/fapi/v1/allOpenOrders' if futures else '/api/v3/openOrders'
+    return binance_request('DELETE', endpoint, params, futures=futures)
+
+
+def get_trade_history_api(symbol: str = None, limit: int = 20, futures: bool = False) -> Optional[List[dict]]:
+    """Get recent trade history from exchange
+    
+    Args:
+        symbol: Trading pair (optional)
+        limit: Number of trades to return
+        futures: Get futures trades
+    """
+    params = {'limit': limit}
+    if symbol:
+        params['symbol'] = symbol.upper()
+    
+    endpoint = '/fapi/v1/userTrades' if futures else '/api/v3/myTrades'
+    result = binance_request('GET', endpoint, params, futures=futures)
+    
+    if result and isinstance(result, list):
+        trades = []
+        for t in result:
+            trades.append({
+                'trade_id': t['id'],
+                'order_id': t['orderId'],
+                'symbol': t['symbol'],
+                'side': 'BUY' if t['isBuyer'] else 'SELL',
+                'price': float(t['price']),
+                'quantity': float(t['qty']),
+                'commission': float(t['commission']),
+                'commission_asset': t['commissionAsset'],
+                'time': datetime.fromtimestamp(t['time'] / 1000).strftime('%Y-%m-%d %H:%M:%S'),
+                'realized_pnl': float(t.get('realizedProfit', 0)) if futures else 0
+            })
+        return trades
+    return None
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # TRADE HISTORY DATABASE
@@ -1394,7 +1815,7 @@ class BloombergTerminal:
             pass
         
         # Help text
-        self.draw_text(y + 1, 2, "help │ view <sym> │ chart <sym> <days> │ compare <sym1> <sym2> <days> │ history │ [H] trades", COLOR_DIM)
+        self.draw_text(y + 1, 2, "help | buy/sell <sym> <qty> [price] | long/short <sym> <qty> [lev] | orders | bal | chart", COLOR_DIM)
     
     def render_trade_history(self):
         """Render the trade history view"""
@@ -1589,7 +2010,8 @@ class BloombergTerminal:
             return
         
         if parts[0] == "help":
-            self.add_message("Commands: view, chart, compare, history, buy/sell, delete, back, refresh", "info")
+            self.add_message("Commands: view, chart, compare, history, bal, spot/futures, orders, delete, back", "info")
+            self.add_message("Spot: buy/sell <sym> <qty> [price] | Futures: long/short <sym> <qty> <lev>", "info")
         
         elif parts[0] == "view" and len(parts) > 1:
             sym = parts[1].upper()
@@ -1607,7 +2029,33 @@ class BloombergTerminal:
             self.add_message("Main view", "info")
         
         elif parts[0] == "bal":
-            self.add_message("Balance: Set BINANCE_API_KEY", "info")
+            # Show account balances
+            if not TRADING_ENABLED:
+                self.add_message("Trading not enabled. Set BINANCE_API_KEY and BINANCE_API_SECRET", "err")
+                return
+            
+            self.add_message("Fetching balances...", "info")
+            
+            def fetch_balances():
+                spot = get_spot_balance()
+                futures = get_futures_balance()
+                
+                if spot:
+                    usdt = next((b for b in spot if b['asset'] == 'USDT'), None)
+                    if usdt:
+                        self.add_message(f"Spot USDT: ${usdt['free']:,.2f} (locked: ${usdt['locked']:,.2f})", "ok")
+                    else:
+                        self.add_message(f"Spot: {len(spot)} assets", "ok")
+                
+                if futures:
+                    usdt = next((b for b in futures if b['asset'] == 'USDT'), None)
+                    if usdt:
+                        self.add_message(f"Futures USDT: ${usdt['balance']:,.2f} (avail: ${usdt['available']:,.2f})", "ok")
+                
+                if not spot and not futures:
+                    self.add_message("Could not fetch balances", "err")
+            
+            threading.Thread(target=fetch_balances, daemon=True).start()
         
         elif parts[0] == "refresh":
             self.add_message("Refreshing market data...", "info")
@@ -1622,38 +2070,234 @@ class BloombergTerminal:
                 self.add_message("Refresh failed", "err")
         
         elif parts[0] in ["buy", "sell"]:
+            # Spot trading: buy/sell <symbol> <quantity> [price]
+            # If price provided = limit order, otherwise = market order (if trading enabled) or local record
             if len(parts) >= 3:
                 try:
                     symbol = parts[1].upper()
                     quantity = float(parts[2])
+                    price = float(parts[3]) if len(parts) >= 4 else None
                     
-                    # Get current price from data
-                    if symbol in self.data:
-                        price = self.data[symbol]['price']
+                    # Ensure symbol has USDT suffix for Binance
+                    if not symbol.endswith('USDT'):
+                        symbol = symbol + 'USDT'
+                    
+                    if TRADING_ENABLED:
+                        # Execute real trade on Binance
+                        self.add_message(f"Executing {parts[0].upper()} {quantity} {symbol}...", "info")
+                        
+                        def execute_spot_trade():
+                            if price:
+                                # Limit order
+                                if parts[0] == 'buy':
+                                    result = spot_limit_buy(symbol, quantity, price)
+                                else:
+                                    result = spot_limit_sell(symbol, quantity, price)
+                            else:
+                                # Market order
+                                if parts[0] == 'buy':
+                                    result = spot_market_buy(symbol, quantity)
+                                else:
+                                    result = spot_market_sell(symbol, quantity)
+                            
+                            if result and 'orderId' in result:
+                                self.add_message(f"Order placed! ID: {result['orderId']}", "ok")
+                                # Also record locally
+                                exec_price = price if price else self.data.get(symbol.replace('USDT', ''), {}).get('price', 0)
+                                if exec_price:
+                                    record_trade(symbol, parts[0].upper(), quantity, exec_price)
+                            elif result and result.get('error'):
+                                self.add_message(f"Error: {result.get('message', 'Unknown error')[:50]}", "err")
+                            else:
+                                self.add_message("Order failed", "err")
+                        
+                        threading.Thread(target=execute_spot_trade, daemon=True).start()
                     else:
-                        # Try to find symbol
-                        for key in self.data:
-                            if symbol in key.upper():
-                                symbol = key
-                                price = self.data[key]['price']
-                                break
+                        # Local record only
+                        if price:
+                            total = quantity * price
+                            trade_id = record_trade(symbol, parts[0].upper(), quantity, price)
+                            self.add_message(f"[LOCAL] {parts[0].upper()} {quantity} {symbol} @ ${price:,.2f} = ${total:,.2f} (ID: {trade_id})", "ok")
                         else:
-                            self.add_message(f"Symbol not found: {symbol}", "err")
-                            return
-                    
-                    # Record the trade
-                    trade_id = record_trade(symbol, parts[0].upper(), quantity, price)
-                    total = quantity * price
-                    self.add_message(f"{parts[0].upper()} {quantity} {symbol} @ ${price:,.2f} = ${total:,.2f} (ID: {trade_id})", "ok")
+                            # Get current price from data
+                            base_symbol = symbol.replace('USDT', '')
+                            if base_symbol in self.data:
+                                price = self.data[base_symbol]['price']
+                            elif symbol in self.data:
+                                price = self.data[symbol]['price']
+                            else:
+                                self.add_message(f"Symbol not found: {symbol}", "err")
+                                return
+                            
+                            total = quantity * price
+                            trade_id = record_trade(symbol, parts[0].upper(), quantity, price)
+                            self.add_message(f"[LOCAL] {parts[0].upper()} {quantity} {symbol} @ ${price:,.2f} = ${total:,.2f} (ID: {trade_id})", "ok")
                     
                 except ValueError:
-                    self.add_message("Invalid quantity", "err")
+                    self.add_message("Invalid quantity or price", "err")
             else:
-                self.add_message(f"Usage: {parts[0]} <symbol> <quantity>", "err")
+                self.add_message(f"Usage: {parts[0]} <symbol> <quantity> [price]", "err")
         
         elif parts[0] in ["history", "trades"]:
             self.view_mode = "history"
             self.add_message("Viewing trade history", "info")
+        
+        elif parts[0] == "positions":
+            # Show open futures positions
+            if not TRADING_ENABLED:
+                self.add_message("Trading not enabled", "err")
+                return
+            
+            def fetch_positions():
+                positions = get_futures_positions()
+                if positions:
+                    for p in positions[:5]:
+                        pnl_str = f"+${p['unrealized_pnl']:,.2f}" if p['unrealized_pnl'] >= 0 else f"-${abs(p['unrealized_pnl']):,.2f}"
+                        self.add_message(f"{p['symbol']} {p['side']} {abs(p['position_amt'])} @ ${p['entry_price']:,.2f} | PnL: {pnl_str}", "ok")
+                    if len(positions) > 5:
+                        self.add_message(f"... and {len(positions) - 5} more positions", "info")
+                else:
+                    self.add_message("No open positions", "info")
+            
+            threading.Thread(target=fetch_positions, daemon=True).start()
+        
+        elif parts[0] == "orders":
+            # Show open orders: orders [symbol] [-f for futures]
+            if not TRADING_ENABLED:
+                self.add_message("Trading not enabled", "err")
+                return
+            
+            symbol = parts[1].upper() if len(parts) > 1 and not parts[1].startswith('-') else None
+            futures = '-f' in parts or '--futures' in parts
+            
+            if symbol and not symbol.endswith('USDT'):
+                symbol = symbol + 'USDT'
+            
+            def fetch_orders():
+                orders = get_open_orders(symbol, futures=futures)
+                if orders:
+                    for o in orders[:5]:
+                        self.add_message(f"{o['symbol']} {o['side']} {o['quantity']} @ ${o['price']:,.2f} | ID: {o['order_id']}", "ok")
+                    if len(orders) > 5:
+                        self.add_message(f"... and {len(orders) - 5} more orders", "info")
+                else:
+                    self.add_message("No open orders", "info")
+            
+            threading.Thread(target=fetch_orders, daemon=True).start()
+        
+        elif parts[0] == "cancel":
+            # Cancel order: cancel <symbol> <order_id> [-f for futures]
+            if not TRADING_ENABLED:
+                self.add_message("Trading not enabled", "err")
+                return
+            
+            if len(parts) >= 3:
+                symbol = parts[1].upper()
+                if not symbol.endswith('USDT'):
+                    symbol = symbol + 'USDT'
+                
+                try:
+                    order_id = int(parts[2])
+                    futures = '-f' in parts or '--futures' in parts
+                    
+                    result = cancel_order(symbol, order_id, futures=futures)
+                    if result and 'orderId' in result:
+                        self.add_message(f"Cancelled order #{order_id}", "ok")
+                    else:
+                        self.add_message(f"Failed to cancel: {result.get('message', 'Unknown')[:40]}", "err")
+                except ValueError:
+                    self.add_message("Invalid order ID", "err")
+            else:
+                self.add_message("Usage: cancel <symbol> <order_id> [-f]", "err")
+        
+        elif parts[0] in ["long", "short"]:
+            # Futures trading: long/short <symbol> <quantity> <leverage>
+            if not TRADING_ENABLED:
+                self.add_message("Trading not enabled. Set BINANCE_API_KEY and BINANCE_API_SECRET", "err")
+                return
+            
+            if len(parts) >= 3:
+                symbol = parts[1].upper()
+                if not symbol.endswith('USDT'):
+                    symbol = symbol + 'USDT'
+                
+                try:
+                    quantity = float(parts[2])
+                    leverage = int(parts[3]) if len(parts) >= 4 else 1
+                    
+                    if leverage < 1 or leverage > 125:
+                        self.add_message("Leverage must be 1-125", "err")
+                        return
+                    
+                    self.add_message(f"Opening {parts[0]} {symbol} x{leverage}...", "info")
+                    
+                    def execute_futures_trade():
+                        if parts[0] == 'long':
+                            result = futures_market_long(symbol, quantity, leverage)
+                        else:
+                            result = futures_market_short(symbol, quantity, leverage)
+                        
+                        if result and 'orderId' in result:
+                            self.add_message(f"Futures {parts[0].upper()} placed! ID: {result['orderId']}", "ok")
+                        elif result and result.get('error'):
+                            self.add_message(f"Error: {result.get('message', 'Unknown error')[:50]}", "err")
+                        else:
+                            self.add_message("Order failed", "err")
+                    
+                    threading.Thread(target=execute_futures_trade, daemon=True).start()
+                except ValueError:
+                    self.add_message("Invalid quantity or leverage", "err")
+            else:
+                self.add_message(f"Usage: {parts[0]} <symbol> <quantity> [leverage]", "err")
+        
+        elif parts[0] == "close":
+            # Close futures position: close <symbol>
+            if not TRADING_ENABLED:
+                self.add_message("Trading not enabled", "err")
+                return
+            
+            if len(parts) >= 2:
+                symbol = parts[1].upper()
+                if not symbol.endswith('USDT'):
+                    symbol = symbol + 'USDT'
+                
+                self.add_message(f"Closing {symbol} position...", "info")
+                
+                def close_pos():
+                    result = futures_close_position(symbol)
+                    if result and 'orderId' in result:
+                        self.add_message(f"Position closed! Order ID: {result['orderId']}", "ok")
+                    elif result and result.get('error'):
+                        self.add_message(f"Error: {result.get('message', 'Unknown')[:40]}", "err")
+                    else:
+                        self.add_message("Could not close position", "err")
+                
+                threading.Thread(target=close_pos, daemon=True).start()
+            else:
+                self.add_message("Usage: close <symbol>", "err")
+        
+        elif parts[0] == "leverage":
+            # Set leverage: leverage <symbol> <leverage>
+            if not TRADING_ENABLED:
+                self.add_message("Trading not enabled", "err")
+                return
+            
+            if len(parts) >= 3:
+                symbol = parts[1].upper()
+                if not symbol.endswith('USDT'):
+                    symbol = symbol + 'USDT'
+                
+                try:
+                    leverage = int(parts[2])
+                    result = set_leverage(symbol, leverage)
+                    if result and 'leverage' in result:
+                        self.add_message(f"{symbol} leverage set to {leverage}x", "ok")
+                    else:
+                        self.add_message(f"Failed to set leverage", "err")
+                except ValueError:
+                    self.add_message("Invalid leverage value", "err")
+            else:
+                self.add_message("Usage: leverage <symbol> <1-125>", "err")
         
         elif parts[0] == "delete" and len(parts) > 1:
             try:

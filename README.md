@@ -18,6 +18,8 @@ python3 bloomberg_terminal.py
 - **Trade History** - record and view all your buys/sells with persistent storage
 - **Price Charts** - ASCII charts for historical price visualization
 - **Asset Comparison** - compare performance of two assets over time
+- **Spot Trading** - market and limit orders on Binance (requires API keys)
+- **Futures Trading** - leveraged long/short positions (requires API keys)
 
 ---
 
